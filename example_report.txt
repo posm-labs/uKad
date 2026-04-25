@@ -1,0 +1,137 @@
+========================================================================
+KLOPFENSTEIN MICROSTRIP TAPER — ENGINEERING REPORT
+========================================================================
+Generated: 2026-04-23T23:45:00.247020Z
+
+*** WARNING: LOW CONFIDENCE — EM VALIDATION RECOMMENDED ***
+
+------------------------------------------------------------------------
+TAPER PROFILE
+------------------------------------------------------------------------
+  ZS = 50.00 Ω    ZL = 75.00 Ω    Z_mid = 61.24 Ω
+  Γ_m = 0.0500    A = 2.0774    ρ₀ = 0.2027
+  Length = 606.584 mm
+  Width range: 0.2479 – 0.4636 mm
+  Width start: 0.4636 mm    end: 0.2479 mm
+
+------------------------------------------------------------------------
+STACKUP
+------------------------------------------------------------------------
+  Laminate: RO4350B
+  Substrate height: 254.0 μm (10.0 mil)
+  Copper thickness: 35.0 μm
+  Dk (design): 3.480
+  Df (10 GHz): 0.0037
+  Conductivity: 5.80e+07 S/m
+  Roughness: 0.50 μm RMS
+
+------------------------------------------------------------------------
+ANALYSIS SETTINGS
+------------------------------------------------------------------------
+  Frequency: 0.100 – 10.000 GHz (21 points)
+  Z_ref: 50.0 Ω
+  f_geometry_ref: 0.100 GHz
+  Segmentation tolerance: 1.00
+
+------------------------------------------------------------------------
+SEGMENTATION
+------------------------------------------------------------------------
+  Segments: 2314
+  Δz range: 230.8 – 461.6 μm (mean 262.1 μm)
+  Max det error: 1.87e-14
+  T-matrix fallback used: No
+
+------------------------------------------------------------------------
+DISCONTINUITY BLOCKS
+------------------------------------------------------------------------
+  [RIGHT][0] PadBlock
+    w_in_m: 2.478721e-04
+    w_out_m: 2.478721e-04
+    w_pad_m: 7.000000e-04
+    l_pad_m: 7.000000e-04
+    h_m: 2.540000e-04
+    er: 3.480000e+00
+  [RIGHT][1] SignalViaSelfBlock
+    d_finished_m: 3.000000e-04
+    h_barrel_m: 2.540000e-04
+    d_antipad_m: 6.000000e-04
+    er_fill: 3.480000e+00
+    sigma_S_per_m: 5.800000e+07
+    L_barrel_H: 2.002645e-11
+    C_barrel_F: 7.094407e-14
+  [RIGHT][2] StubBlock
+    h_stub_m: 0.000000e+00
+    d_finished_m: 3.000000e-04
+    d_antipad_m: 6.000000e-04
+    er_fill: 3.480000e+00
+    Z_stub_ohm: 2.227853e+01
+  [RIGHT][3] ReturnPathBlock
+    d_sig_m: 3.000000e-04
+    h_transition_m: 2.540000e-04
+    d_antipad_sig_m: 6.000000e-04
+    er: 3.480000e+00
+    has_return_via: True
+    d_ret_m: 3.000000e-04
+    s_m: 1.000000e-03
+    d_antipad_ret_m: 6.000000e-04
+    L_loop_H: 9.637370e-11
+    C_spread_F: 3.429941e-14
+
+------------------------------------------------------------------------
+MODEL ASSUMPTIONS
+------------------------------------------------------------------------
+  Microstrip: Hammerstad-Jensen 1980 (quasi-static, thickness-corrected)
+  Dispersion: Kirschning-Jansen 1982/1984 (P1-P4 for eeff, R1-R17 for Zc)
+  Conductor loss: Hammerstad CAD-grade (geometry-dependent edge current, W/h branches)
+  Dielectric loss: Pozar standard (k0*er*(eeff-1)*tand / (2*sqrt(eeff)*(er-1)))
+  Roughness: Hammerstad K_sr = 1 + (2/pi)*atan(1.4*(delta/skin_depth)^2)
+  Zc treatment: Real-valued (loss enters only through complex gamma)
+  Loss mechanism: Complex propagation constant gamma = alpha + j*beta
+  Cascade: ABCD multiplication with determinant conditioning check; T-matrix fallback if |det-1| > 1e-3
+  Klopfenstein: Classical Klopfenstein 1956 with Kajfez 1973 correction; 25-term phi recursion
+  Width inversion: Brent's method, bracket [10um, 50*h]
+  tan δ: Frequency-flat (v1); value from settings.stackup.df_10ghz
+
+------------------------------------------------------------------------
+S-PARAMETER SUMMARY
+------------------------------------------------------------------------
+  Max |S11|: -13.02 dB
+  Worst insertion loss: -4.06 dB
+
+------------------------------------------------------------------------
+S-PARAMETER DATA (sampled)
+------------------------------------------------------------------------
+     f (GHz)    |S11| dB    |S21| dB    ∠S11 (°)    ∠S21 (°)
+    --------    --------    --------    --------    --------
+       0.100      -13.02       -0.31       -68.4      -119.3
+       0.595      -16.78       -0.42      -149.4        10.1
+       1.090      -16.52       -0.64       100.0       139.0
+       1.585      -15.11       -0.88        10.2       -91.7
+       2.080      -16.30       -1.04       -75.0        37.5
+       2.575      -18.49       -1.19       178.3       166.2
+       3.070      -16.75       -1.42        70.3       -65.4
+       3.565      -15.89       -1.63       -15.5        63.4
+       4.060      -18.01       -1.77      -106.5      -168.2
+       4.555      -18.96       -1.95       136.2       -40.4
+       5.050      -16.59       -2.18        36.8        87.4
+       5.545      -16.90       -2.36       -48.5      -144.6
+       6.040      -19.68       -2.51      -152.6       -17.3
+       6.535      -18.29       -2.72        88.6       109.7
+       7.030      -16.67       -2.94        -1.8      -123.1
+       7.525      -18.62       -3.10       -92.9         3.8
+       8.020      -20.17       -3.27       144.7       130.0
+       8.515      -17.39       -3.50        39.5      -103.8
+       9.010      -17.65       -3.69       -48.1        22.5
+       9.505      -20.79       -3.85      -157.7       148.2
+      10.000      -18.82       -4.06        78.8       -86.5
+
+------------------------------------------------------------------------
+WARNINGS
+------------------------------------------------------------------------
+  [WARNING] KlopfensteinProfile: Profile start impedance error: Z(0)=52.564Ω vs ZS=50.000Ω (5.13%).
+  [WARNING] KlopfensteinProfile: Profile end impedance error: Z(L)=71.342Ω vs ZL=75.000Ω (4.88%).
+  [HIGH] Segmentation: Hit segment cap (2000). Results may lack convergence.
+
+========================================================================
+END OF REPORT
+========================================================================

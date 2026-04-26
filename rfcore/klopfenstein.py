@@ -116,6 +116,7 @@ class KlopfensteinProfile:
         L: Optional[float] = None,
         f_min: Optional[float] = None,
         f_geom: Optional[float] = None,
+        length_margin: float = 1.0,
         n_samples: int = 201,
     ) -> None:
         if ZS <= 0 or ZL <= 0:
@@ -124,12 +125,15 @@ class KlopfensteinProfile:
             raise ValueError("ZS must not equal ZL (no taper needed).")
         if not (0 < Gamma_m < 1):
             raise ValueError(f"Gamma_m must be in (0, 1), got {Gamma_m}")
+        if length_margin < 1.0:
+            raise ValueError(f"length_margin must be >= 1.0, got {length_margin}")
 
         self.ZS = ZS
         self.ZL = ZL
         self.Gamma_m = Gamma_m
         self.microstrip = microstrip
         self.f_min = f_min
+        self.length_margin = length_margin
         self.n_samples = n_samples
 
         # Geometry-synthesis frequency: defaults to f_min
@@ -154,17 +158,31 @@ class KlopfensteinProfile:
 
         # Length
         if L is not None:
+            # Fixed-length mode: L_min is computed for reference only
             self.L = L
+            if f_min is not None:
+                self.L_min = self.solve_length(f_min)
+            else:
+                self.L_min = L  # no f_min → L_min = L by convention
         elif f_min is not None:
-            self.L = self.solve_length(f_min)
+            self.L_min = self.solve_length(f_min)
+            self.L = length_margin * self.L_min
         else:
             raise ValueError("Either L or f_min must be provided.")
 
-        # Pre-compute profile
+        # Pre-compute the ideal electrical impedance profile.
+        # The raw Klopfenstein profile has inherent endpoint steps of
+        # magnitude ρ₀/cosh(A) = Γm.  These are part of the classical
+        # optimal design and are NOT errors.
         self._z_array = np.linspace(0.0, self.L, self.n_samples)
         self._Z_array = np.array([self.Z_at(z) for z in self._z_array])
 
-        # Width inversion
+        # Endpoint step magnitudes (ideal profile)
+        self.endpoint_step_ln = abs(self.rho_0) / math.cosh(self.A)
+        self.Z_raw_start = float(self._Z_array[0])
+        self.Z_raw_end = float(self._Z_array[-1])
+
+        # Width inversion from ideal impedance profile
         if self._f_geom is not None and self._f_geom > 0:
             self._w_array = np.array([
                 self.microstrip.width_for_Z(Z, self._f_geom)
@@ -175,6 +193,18 @@ class KlopfensteinProfile:
                 self.microstrip.width_for_Z_static(Z)
                 for Z in self._Z_array
             ])
+
+        # Layout width array: endpoint widths are clamped to the feed-line
+        # widths (ZS, ZL) so the manufactured trace connects cleanly.
+        # This is a layout realization constraint, not a change to the
+        # ideal electrical profile.
+        self._w_layout = self._w_array.copy()
+        if self._f_geom is not None and self._f_geom > 0:
+            self._w_layout[0] = self.microstrip.width_for_Z(self.ZS, self._f_geom)
+            self._w_layout[-1] = self.microstrip.width_for_Z(self.ZL, self._f_geom)
+        else:
+            self._w_layout[0] = self.microstrip.width_for_Z_static(self.ZS)
+            self._w_layout[-1] = self.microstrip.width_for_Z_static(self.ZL)
 
     # -----------------------------------------------------------------------
     # Profile computation
@@ -269,13 +299,26 @@ class KlopfensteinProfile:
 
     @property
     def Z_profile(self) -> np.ndarray:
-        """Impedance profile Z(z) in ohms."""
+        """Ideal electrical impedance profile Z(z) in ohms.
+
+        Includes the inherent Klopfenstein endpoint steps.
+        Z_profile[0] ≈ ZS·exp(Γm), Z_profile[-1] ≈ ZL·exp(-Γm).
+        """
         return self._Z_array
 
     @property
     def w_profile(self) -> np.ndarray:
-        """Width profile w(z) in metres."""
+        """Width profile w(z) in metres (ideal electrical profile)."""
         return self._w_array
+
+    @property
+    def w_layout(self) -> np.ndarray:
+        """Layout width profile (metres) — endpoints clamped to feed-line widths.
+
+        Identical to w_profile except at endpoints, where widths are
+        set to match ZS and ZL exactly for trace connectivity.
+        """
+        return self._w_layout
 
     # -----------------------------------------------------------------------
     # Validation / warnings
@@ -318,20 +361,20 @@ class KlopfensteinProfile:
                 "This indicates a numerical issue in the φ recursion."
             )
 
-        # Check endpoint accuracy
-        z0_err = abs(self._Z_array[0] - self.ZS) / self.ZS
-        zL_err = abs(self._Z_array[-1] - self.ZL) / self.ZL
-        if z0_err > 0.01:
+        # Endpoint steps are inherent to the Klopfenstein design;
+        # they are NOT errors.  Only warn if the steps deviate from
+        # the expected value of Γm.
+        expected_step = abs(self.rho_0) / math.cosh(self.A)
+        actual_start_step = abs(math.log(self._Z_array[0] / self.ZS))
+        actual_end_step = abs(math.log(self._Z_array[-1] / self.ZL))
+        step_err = max(
+            abs(actual_start_step - expected_step),
+            abs(actual_end_step - expected_step),
+        )
+        if step_err > 0.01 * expected_step:  # >1% deviation from expected Γm step
             warnings.append(
-                f"WARNING: Profile start impedance error: "
-                f"Z(0)={self._Z_array[0]:.3f}Ω vs ZS={self.ZS:.3f}Ω "
-                f"({z0_err*100:.2f}%)."
-            )
-        if zL_err > 0.01:
-            warnings.append(
-                f"WARNING: Profile end impedance error: "
-                f"Z(L)={self._Z_array[-1]:.3f}Ω vs ZL={self.ZL:.3f}Ω "
-                f"({zL_err*100:.2f}%)."
+                f"WARNING: Endpoint step deviates from expected Γm={expected_step:.4f} "
+                f"by {step_err/expected_step*100:.2f}%.  Check φ recursion convergence."
             )
 
         # Check midpoint

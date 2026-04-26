@@ -114,8 +114,8 @@ def build_segments(
 
         for seg in segments:
             if len(new_segments) >= MAX_SEGMENTS:
-                new_segments.append(seg)
-                continue
+                # Hard stop: do not add any more segments
+                break
 
             # Check criterion 1: electrical length at f_stop
             beta_f = microstrip.beta(seg.w_rep, f_stop)
@@ -153,6 +153,10 @@ def build_segments(
         segments = new_segments
         if not refined:
             break
+
+    # Hard cap: guarantee we never exceed MAX_SEGMENTS
+    if len(segments) > MAX_SEGMENTS:
+        segments = segments[:MAX_SEGMENTS]
 
     return segments
 

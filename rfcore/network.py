@@ -186,24 +186,52 @@ def cascade_conditioned(matrices: list[Mat2], z0: float = 50.0) -> tuple[Mat2, f
 # ---------------------------------------------------------------------------
 
 def abcd_to_s(abcd: Mat2, z0: float) -> Mat2:
-    """Convert 2×2 ABCD matrix to 2×2 S-parameter matrix.
+    """Convert ABCD to S with equal port reference impedance z0.
 
-    Uses Pozar convention with real reference impedance z0.
+    Convenience wrapper for abcd_to_s_gen(abcd, z0, z0).
+    """
+    return abcd_to_s_gen(abcd, z0, z0)
 
-    S11 = (A + B/Z0 - C·Z0 - D) / Δ
-    S12 = 2·(AD - BC) / Δ
-    S21 = 2 / Δ
-    S22 = (-A + B/Z0 - C·Z0 + D) / Δ
 
-    where Δ = A + B/Z0 + C·Z0 + D
+def abcd_to_s_gen(abcd: Mat2, z01: float, z02: float) -> Mat2:
+    """Convert 2×2 ABCD matrix to S-parameters with unequal port references.
+
+    Port 1 referenced to z01, port 2 referenced to z02.
+
+    Generalized Pozar / Frickey 1994 (real reference impedances):
+
+        S11 = (A·z02 + B - C·z01·z02 - D·z01) / Δ
+        S12 = 2·√(z01·z02)·(A·D - B·C) / Δ
+        S21 = 2·√(z01·z02) / Δ
+        S22 = (-A·z02 + B - C·z01·z02 + D·z01) / Δ
+
+        Δ = A·z02 + B + C·z01·z02 + D·z01
+
+    When z01 = z02 = z0, this reduces to the standard Pozar form.
+
+    Parameters
+    ----------
+    abcd : Mat2
+        2×2 ABCD matrix.
+    z01 : float
+        Port 1 reference impedance (real, ohms).
+    z02 : float
+        Port 2 reference impedance (real, ohms).
+
+    Returns
+    -------
+    Mat2
+        2×2 S-parameter matrix.
     """
     a, b, c, d = abcd[0, 0], abcd[0, 1], abcd[1, 0], abcd[1, 1]
-    delta = a + b / z0 + c * z0 + d
+    sqrt_z = np.sqrt(z01 * z02)
 
-    s11 = (a + b / z0 - c * z0 - d) / delta
-    s12 = 2.0 * (a * d - b * c) / delta
-    s21 = 2.0 / delta
-    s22 = (-a + b / z0 - c * z0 + d) / delta
+    delta = a * z02 + b + c * z01 * z02 + d * z01
+
+    s11 = (a * z02 + b - c * z01 * z02 - d * z01) / delta
+    s12 = 2.0 * sqrt_z * (a * d - b * c) / delta
+    s21 = 2.0 * sqrt_z / delta
+    s22 = (-a * z02 + b - c * z01 * z02 + d * z01) / delta
 
     return np.array([[s11, s12], [s21, s22]], dtype=np.complex128)
 

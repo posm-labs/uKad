@@ -98,6 +98,7 @@ def synthesize_taper(
         L=request.L_fixed_m,
         f_min=settings.analysis.f_start_hz,
         f_geom=settings.analysis.f_geom,
+        length_margin=settings.analysis.length_margin,
     )
 
     # Build discontinuity chains (empty for headless mode without board data)
@@ -150,6 +151,7 @@ def synthesize_with_discontinuities(
         L=request.L_fixed_m,
         f_min=settings.analysis.f_start_hz,
         f_geom=settings.analysis.f_geom,
+        length_margin=settings.analysis.length_margin,
     )
 
     left_chain = left_blocks or []

@@ -19,7 +19,8 @@ from rfcore.microstrip import MicrostripModel
 from rfcore.klopfenstein import KlopfensteinProfile
 from rfcore.taper_body import build_segments, evaluate_body, TaperSegment
 from rfcore.network import (
-    Mat2, cascade, cascade_conditioned, abcd_to_s, abcd_identity, s_to_db,
+    Mat2, cascade, cascade_conditioned, abcd_to_s, abcd_to_s_gen,
+    abcd_identity, s_to_db,
 )
 from rfcore.discontinuities.base import DiscontinuityBlock
 from rfcore.warnings import WarningCollector, Severity
@@ -153,7 +154,11 @@ class TaperAssembly:
             all_matrices = [abcd_left, body_result.abcd, abcd_right]
             abcd_total, det_err = cascade_conditioned(all_matrices, z0)
 
-            s = abcd_to_s(abcd_total, z0)
+            # Convert ABCD → S with port references matching the taper endpoints.
+            # Port 1 = ZS (source side), Port 2 = ZL (load side).
+            z01 = self.profile.ZS
+            z02 = self.profile.ZL
+            s = abcd_to_s_gen(abcd_total, z01, z02)
             s_params[fi] = s
             det_errors.append(det_err)
             used_fallbacks.append(body_result.used_fallback or det_err > 1e-3)

@@ -73,11 +73,12 @@ class AnalysisSettings:
     """Frequency sweep and segmentation parameters."""
 
     zref_ohm: float = 50.0
-    f_start_hz: float = 0.1e9                      # 100 MHz default
+    f_start_hz: float = 1.0e9                      # 1 GHz default
     f_stop_hz: float = 20.0e9                      # 20 GHz default
     n_points: int = 201
     f_geometry_ref_hz: Optional[float] = None       # None → use f_start_hz (= f_min)
     segmentation_tol: float = 1.0                   # 1.0 = default refinement thresholds
+    length_margin: float = 1.0                        # L = length_margin * L_min; range [1.0, 4.0]
     warn_if_electrically_short: bool = True
 
     @property
@@ -97,6 +98,8 @@ class AnalysisSettings:
             errors.append("n_points must be >= 2.")
         if self.segmentation_tol <= 0:
             errors.append("segmentation_tol must be positive.")
+        if not (1.0 <= self.length_margin <= 4.0):
+            errors.append("length_margin must be in [1.0, 4.0].")
         if self.f_geometry_ref_hz is not None and self.f_geometry_ref_hz <= 0:
             errors.append("f_geometry_ref_hz must be positive when set.")
         return errors

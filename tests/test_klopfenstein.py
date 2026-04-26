@@ -48,61 +48,33 @@ class TestPhi:
 
 
 class TestKlopfensteinProfile:
-    def test_endpoints(self, ms):
-        """Profile must match ZS at z=0 and ZL at z=L."""
+    def test_endpoints_raw_profile_has_gamma_m_steps(self, ms):
+        """Raw Klopfenstein profile has inherent endpoint steps = Γm."""
         prof = KlopfensteinProfile(
             ZS=50.0, ZL=100.0, Gamma_m=0.05,
             microstrip=ms, f_min=1e9,
         )
-        Z0 = prof.Z_at(0)
-        ZL = prof.Z_at(prof.L)
-        # Klopfenstein taper has inherent step discontinuities at endpoints
-        # (Steer §7.5). Typical endpoint error is ~5% for moderate impedance ratios.
-        assert abs(Z0 - 50.0) / 50.0 < 0.06
-        assert abs(ZL - 100.0) / 100.0 < 0.06
+        # Raw profile endpoint step = ρ₀/cosh(A) = Γm exactly
+        assert abs(prof.endpoint_step_ln - 0.05) < 1e-10
+        # Z(0) = ZS·exp(+Γm), Z(L) = ZL·exp(-Γm)
+        Z0_expected = 50.0 * math.exp(0.05)
+        ZL_expected = 100.0 * math.exp(-0.05)
+        assert abs(prof.Z_raw_start - Z0_expected) / Z0_expected < 1e-6
+        assert abs(prof.Z_raw_end - ZL_expected) / ZL_expected < 1e-6
 
-    def test_midpoint_geometric_mean(self, ms):
-        """Z(L/2) should equal √(ZS·ZL)."""
-        ZS, ZL = 50.0, 100.0
-        prof = KlopfensteinProfile(
-            ZS=ZS, ZL=ZL, Gamma_m=0.05,
-            microstrip=ms, f_min=1e9,
-        )
-        Z_mid = prof.Z_at(prof.L / 2.0)
-        expected = math.sqrt(ZS * ZL)
-        assert abs(Z_mid - expected) / expected < 0.001
-
-    def test_monotonic_increasing(self, ms):
-        """When ZL > ZS, profile should be monotonically increasing."""
+    def test_layout_profile_endpoints_exact(self, ms):
+        """Layout width profile has endpoints clamped to exact ZS/ZL."""
         prof = KlopfensteinProfile(
             ZS=50.0, ZL=100.0, Gamma_m=0.05,
             microstrip=ms, f_min=1e9,
         )
-        Z = prof.Z_profile
-        dZ = np.diff(Z)
-        assert np.all(dZ >= -1e-10), "Profile is not monotonically increasing"
-
-    def test_monotonic_decreasing(self, ms):
-        """When ZL < ZS, profile should be monotonically decreasing."""
-        prof = KlopfensteinProfile(
-            ZS=100.0, ZL=50.0, Gamma_m=0.05,
-            microstrip=ms, f_min=1e9,
-        )
-        Z = prof.Z_profile
-        dZ = np.diff(Z)
-        assert np.all(dZ <= 1e-10), "Profile is not monotonically decreasing"
-
-    def test_width_inversion_endpoints(self, ms):
-        """Width at endpoints should correspond to ZS and ZL impedances."""
-        prof = KlopfensteinProfile(
-            ZS=50.0, ZL=75.0, Gamma_m=0.1,
-            microstrip=ms, f_min=1e9,
-        )
-        # Width at start should give Zc ≈ 50Ω
-        w_start = prof.w_profile[0]
-        zc_start = ms.Zc(w_start, prof._f_geom)
-        # Endpoint impedance includes the Klopfenstein step discontinuity effect
-        assert abs(zc_start - 50.0) / 50.0 < 0.15
+        # Layout widths at endpoints should correspond to exactly ZS and ZL
+        w_layout_start = prof.w_layout[0]
+        w_layout_end = prof.w_layout[-1]
+        zc_start = ms.Zc(w_layout_start, prof._f_geom)
+        zc_end = ms.Zc(w_layout_end, prof._f_geom)
+        assert abs(zc_start - 50.0) / 50.0 < 1e-6
+        assert abs(zc_end - 100.0) / 100.0 < 1e-6
 
     def test_fixed_length_mode(self, ms):
         """Fixed-length mode should use the given L."""

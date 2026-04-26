@@ -54,12 +54,22 @@ class ProfileSummary:
     Gamma_m: float
     A_parameter: float
     rho_0: float
-    L_m: float
-    L_mm: float
+    L_m: float           # L_actual
+    L_mm: float          # L_actual in mm
+    L_min_m: float       # minimum theoretical length
+    L_min_mm: float      # minimum theoretical length in mm
+    length_margin: float # L_actual / L_min
+    # Ideal electrical profile (includes endpoint steps)
     w_start_mm: float
     w_end_mm: float
     w_min_mm: float
     w_max_mm: float
+    Z_raw_start: float
+    Z_raw_end: float
+    endpoint_step_ln: float    # = Γm in log-impedance
+    # Layout-realized profile (endpoints clamped to feed widths)
+    w_layout_start_mm: float
+    w_layout_end_mm: float
     n_profile_samples: int
 
 
@@ -157,10 +167,18 @@ class TaperReport:
             rho_0=p.rho_0,
             L_m=p.L,
             L_mm=p.L * 1e3,
+            L_min_m=p.L_min,
+            L_min_mm=p.L_min * 1e3,
+            length_margin=p.length_margin,
             w_start_mm=float(p.w_profile[0] * 1e3),
             w_end_mm=float(p.w_profile[-1] * 1e3),
             w_min_mm=float(np.min(p.w_profile) * 1e3),
             w_max_mm=float(np.max(p.w_profile) * 1e3),
+            Z_raw_start=p.Z_raw_start,
+            Z_raw_end=p.Z_raw_end,
+            endpoint_step_ln=p.endpoint_step_ln,
+            w_layout_start_mm=float(p.w_layout[0] * 1e3),
+            w_layout_end_mm=float(p.w_layout[-1] * 1e3),
             n_profile_samples=p.n_samples,
         )
 
@@ -245,9 +263,24 @@ class TaperReport:
                       f"Z_mid = {ps.Z_mid_ohm:.2f} Ω")
         lines.append(f"  Γ_m = {ps.Gamma_m:.4f}    A = {ps.A_parameter:.4f}    "
                       f"ρ₀ = {ps.rho_0:.4f}")
-        lines.append(f"  Length = {ps.L_mm:.3f} mm")
-        lines.append(f"  Width range: {ps.w_min_mm:.4f} – {ps.w_max_mm:.4f} mm")
-        lines.append(f"  Width start: {ps.w_start_mm:.4f} mm    end: {ps.w_end_mm:.4f} mm")
+        lines.append("")
+        lines.append("  Synthesis:")
+        lines.append(f"    f_min (synthesis lower edge) = {self.profile.f_min/1e9:.3f} GHz")
+        lines.append(f"    L_min = A/β(f_min) = {ps.L_min_mm:.3f} mm")
+        if ps.length_margin != 1.0:
+            lines.append(f"    length_margin = {ps.length_margin:.2f}")
+        lines.append(f"    L_actual = {ps.L_mm:.3f} mm"
+                      + (f"  ({ps.length_margin:.2f} × L_min)" if ps.length_margin != 1.0 else ""))
+        lines.append("")
+        lines.append("  Ideal electrical profile (raw Klopfenstein):")
+        lines.append(f"    Z(0)  = {ps.Z_raw_start:.3f} Ω    Z(L)  = {ps.Z_raw_end:.3f} Ω")
+        lines.append(f"    Width range: {ps.w_min_mm:.4f} – {ps.w_max_mm:.4f} mm")
+        lines.append(f"    Endpoint step = ρ₀/cosh(A) = {ps.endpoint_step_ln:.6f} = Γm")
+        lines.append(f"    (Inherent Klopfenstein design: endpoints carry Γm reflection)")
+        lines.append("")
+        lines.append("  Realized layout profile (endpoints clamped to feed widths):")
+        lines.append(f"    w_start = {ps.w_layout_start_mm:.4f} mm (at ZS = {ps.ZS_ohm:.2f} Ω)")
+        lines.append(f"    w_end   = {ps.w_layout_end_mm:.4f} mm (at ZL = {ps.ZL_ohm:.2f} Ω)")
         lines.append("")
 
         # --- Stackup ---
@@ -270,11 +303,12 @@ class TaperReport:
         lines.append("-" * W)
         lines.append("ANALYSIS SETTINGS")
         lines.append("-" * W)
-        lines.append(f"  Frequency: {a.f_start_hz/1e9:.3f} – {a.f_stop_hz/1e9:.3f} GHz "
+        lines.append(f"  Analysis band: {a.f_start_hz/1e9:.3f} – {a.f_stop_hz/1e9:.3f} GHz "
                       f"({a.n_points} points)")
         lines.append(f"  Z_ref: {a.zref_ohm:.1f} Ω")
-        lines.append(f"  f_geometry_ref: {a.f_geom/1e9:.3f} GHz")
+        lines.append(f"  f_geometry: {a.f_geom/1e9:.3f} GHz")
         lines.append(f"  Segmentation tolerance: {a.segmentation_tol:.2f}")
+        lines.append(f"  Length margin: {a.length_margin:.2f}")
         lines.append("")
 
         # --- Segmentation ---
@@ -405,11 +439,29 @@ class TaperReport:
                 "Gamma_m": ps.Gamma_m,
                 "A": ps.A_parameter,
                 "rho_0": ps.rho_0,
-                "L_m": ps.L_m,
-                "w_start_m": float(self.profile.w_profile[0]),
-                "w_end_m": float(self.profile.w_profile[-1]),
-                "w_min_m": float(np.min(self.profile.w_profile)),
-                "w_max_m": float(np.max(self.profile.w_profile)),
+                "synthesis": {
+                    "f_min_hz": self.profile.f_min,
+                    "L_min_m": ps.L_min_m,
+                    "length_margin": ps.length_margin,
+                    "L_actual_m": ps.L_m,
+                },
+                "endpoint_steps": {
+                    "description": "Inherent Klopfenstein endpoint steps of magnitude Gamma_m",
+                    "step_magnitude_ln": ps.endpoint_step_ln,
+                    "Z_raw_start_ohm": ps.Z_raw_start,
+                    "Z_raw_end_ohm": ps.Z_raw_end,
+                },
+                "ideal_electrical": {
+                    "w_start_m": float(self.profile.w_profile[0]),
+                    "w_end_m": float(self.profile.w_profile[-1]),
+                    "w_min_m": float(np.min(self.profile.w_profile)),
+                    "w_max_m": float(np.max(self.profile.w_profile)),
+                },
+                "layout_realized": {
+                    "description": "Endpoint widths clamped to feed-line widths for trace connectivity",
+                    "w_start_m": float(self.profile.w_layout[0]),
+                    "w_end_m": float(self.profile.w_layout[-1]),
+                },
             },
             "stackup": self.settings.stackup.__dict__,
             "analysis": {
@@ -417,7 +469,8 @@ class TaperReport:
                 "f_stop_hz": self.settings.analysis.f_stop_hz,
                 "n_points": self.settings.analysis.n_points,
                 "zref_ohm": self.settings.analysis.zref_ohm,
-                "f_geometry_ref_hz": self.settings.analysis.f_geom,
+                "f_geometry_hz": self.settings.analysis.f_geom,
+                "length_margin": self.settings.analysis.length_margin,
             },
             "segmentation": {
                 "n_segments": ss.n_segments,

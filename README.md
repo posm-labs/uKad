@@ -28,73 +28,55 @@ uKad aims to:
 ## Current Scope
 
 ### Transmission lines
-- microstrip / CPW impedance calculations
+- microstrip impedance calculations
 - effective permittivity and guided wavelength
 - rough loss estimates
 
 ### Tapers and transitions
 - impedance tapers (linear, exponential, Klopfenstein planned)
-- SMA → microstrip transitions (geometry-driven, not idealized ports)
-- investigation of nearby via effects (not just “perfect line” models)
-
-### Passive structures (early)
-- Wilkinson dividers
-- filter primitives (hairpin / coupled-line work in progress)
+- SMA → microstrip transitions
 
 ---
 
-## Design Approach
+## Assumptions (current)
 
-- Start from geometry, not ideal ports  
-- Keep analytical models simple but physically meaningful  
-- Treat discontinuities (vias, pads, launches) as first-class problems  
-- Use EM simulation as a check, not the starting point  
+Right now the models assume a standard 2-layer stackup:
+- microstrip over solid ground plane  
+- uniform substrate (RO4350B)  
+- quasi-TEM propagation  
 
-The intent is not to replace ADS/HFSS, but to reduce how often you need them.
-
----
-
-## Planned Features
-
-- substrate/material database (RO4350B, etc.)
-- better discontinuity models (via fences, pads, step changes)
-- automated export to EM solvers (likely openEMS first)
-- S-parameter visualization and comparison (analytic vs EM)
-- KiCad plugin interface (select geometry → run tool)
+This keeps the analytical models fast and reasonably accurate. Layout-induced effects (vias, pads, launches) are handled separately or pushed to EM validation.
 
 ---
 
-## Example Direction
+## References
 
-Target workflow:
+Microstrip / transmission line models:
+- Hammerstad & Jensen, *Accurate Models for Microstrip Computer-Aided Design*
+- https://qucs.sourceforge.net/tech/node75.html
+- https://qucs.sourceforge.net/docs/technical/technical.pdf
 
-1. select SMA footprint and attached trace in KiCad  
-2. generate taper based on actual pad + trace geometry  
-3. compute expected impedance profile and reflection  
-4. run EM simulation on extracted geometry  
-5. compare S11/S21 and adjust  
+Effective dielectric constant (wide frequency validity):
+- Kirschning & Jansen, *Accurate model for effective dielectric constant of microstrip with validity up to millimetre-wave frequencies*
 
----
+Taper theory:
+- R. W. Klopfenstein, *A Transmission Line Taper of Improved Design*
+- https://www.microwaves101.com/encyclopedias/klopfenstein-taper
+- https://eng.libretexts.org/Bookshelves/Electrical_Engineering/Electronics/Microwave_and_RF_Design_III_-_Networks_%28Steer%29/07%3A_Chapter_7/7.5%3A_Tapered_Matching_Transformers
 
-## Status
+Discontinuities / vias:
+- Goldfarb & Pucel via model  
+  https://qucs.sourceforge.net/tech/node83.html
+- S-parameter modeling of microstrip discontinuities  
+  https://www.researchgate.net/profile/Guenter-Kompa-2/publication/234324743_S-matrix_computation_of_microstrip_discontinuities_with_a_planar_waveguide_model/links/560cfbe908aea68653d38f74/S-matrix-computation-of-microstrip-discontinuities-with-a-planar-waveguide-model.pdf
 
-Early and incomplete. Expect:
-- missing features
-- changing APIs
-- rough edges
+Inductance calculations:
+- Grover, *Inductance Calculations*
 
----
+Substrate:
+- Rogers RO4350B datasheet  
+  https://www.rogerscorp.com/advanced-electronics-solutions/ro4000-series-laminates/ro4350b-laminates
 
-## Contributing
-
-Useful areas:
-- transmission line / discontinuity modeling
-- EM integration (openEMS or others)
-- KiCad scripting / plugin interface
-- microwave filter and coupler synthesis
-
----
-
-## Notes
-
-If you're doing RF in KiCad and constantly exporting to other tools just to answer simple questions, this project is meant to reduce that friction.
+EM backend:
+- openEMS  
+  https://openems.de

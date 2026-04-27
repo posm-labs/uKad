@@ -210,3 +210,6 @@ example_report_via_launch.json
 example_report_via_launch.txt
 example_report.json
 example_report.txt
+
+# Generated test exports
+test_exports/

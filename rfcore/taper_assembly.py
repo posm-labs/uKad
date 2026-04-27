@@ -28,11 +28,22 @@ from rfcore.warnings import WarningCollector, Severity
 
 @dataclass
 class AssemblyResult:
-    """Result from evaluating the full taper assembly."""
+    """Result from evaluating the full taper assembly.
+
+    S-parameters use generalized unequal-port references:
+        Port 1 referenced to z01 (= ZS, source impedance)
+        Port 2 referenced to z02 (= ZL, load impedance)
+
+    S11 represents input reflection with port 2 matched to ZL.
+    S22 represents output reflection with port 1 matched to ZS.
+    """
     freqs: np.ndarray                   # frequency array (Hz)
     s_params: np.ndarray                # shape (n_freq, 2, 2) complex
-    s11_db: np.ndarray                  # |S11| in dB
+    s11_db: np.ndarray                  # |S11| in dB (port 1 ref = z01)
     s21_db: np.ndarray                  # |S21| in dB
+    s22_db: np.ndarray                  # |S22| in dB (port 2 ref = z02)
+    z01: float                          # port 1 reference impedance (ZS)
+    z02: float                          # port 2 reference impedance (ZL)
     warnings: WarningCollector
     body_segments: List[TaperSegment]
     det_errors: List[float]
@@ -44,8 +55,13 @@ class AssemblyResult:
 
     @property
     def max_s11_db(self) -> float:
-        """Worst-case return loss (most positive S11 in dB)."""
+        """Worst-case input return loss (most positive S11 in dB)."""
         return float(np.max(self.s11_db))
+
+    @property
+    def max_s22_db(self) -> float:
+        """Worst-case output return loss (most positive S22 in dB)."""
+        return float(np.max(self.s22_db))
 
     @property
     def max_insertion_loss_db(self) -> float:
@@ -166,6 +182,7 @@ class TaperAssembly:
         # Post-process
         s11_db = np.array([s_to_db(s_params[i, 0, 0]) for i in range(n_freq)])
         s21_db = np.array([s_to_db(s_params[i, 1, 0]) for i in range(n_freq)])
+        s22_db = np.array([s_to_db(s_params[i, 1, 1]) for i in range(n_freq)])
 
         # Check cascade conditioning across sweep
         max_det_err = max(det_errors) if det_errors else 0.0
@@ -186,6 +203,9 @@ class TaperAssembly:
             s_params=s_params,
             s11_db=s11_db,
             s21_db=s21_db,
+            s22_db=s22_db,
+            z01=self.profile.ZS,
+            z02=self.profile.ZL,
             warnings=warnings,
             body_segments=self.segments,
             det_errors=det_errors,

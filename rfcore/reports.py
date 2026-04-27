@@ -43,6 +43,9 @@ class FrequencyData:
     s21_mag: float
     s21_db: float
     s21_phase_deg: float
+    s22_mag: float
+    s22_db: float
+    s22_phase_deg: float
 
 
 @dataclass
@@ -144,6 +147,7 @@ class TaperReport:
         for i, f in enumerate(self.result.freqs):
             s11 = self.result.s_params[i, 0, 0]
             s21 = self.result.s_params[i, 1, 0]
+            s22 = self.result.s_params[i, 1, 1]
             data.append(FrequencyData(
                 f_hz=float(f),
                 s11_mag=float(abs(s11)),
@@ -152,6 +156,9 @@ class TaperReport:
                 s21_mag=float(abs(s21)),
                 s21_db=float(self.result.s21_db[i]),
                 s21_phase_deg=float(np.degrees(np.angle(s21))),
+                s22_mag=float(abs(s22)),
+                s22_db=float(self.result.s22_db[i]),
+                s22_phase_deg=float(np.degrees(np.angle(s22))),
             ))
         return data
 
@@ -323,12 +330,17 @@ class TaperReport:
         lines.append(f"  T-matrix fallback used: {'Yes' if ss.used_fallback else 'No'}")
         lines.append("")
 
-        # --- Block-by-block breakdown ---
+        # --- Optional transition blocks ---
         blocks = self._block_summaries()
         if blocks:
             lines.append("-" * W)
-            lines.append("DISCONTINUITY BLOCKS")
+            lines.append("OPTIONAL LAUNCH / TRANSITION CHAIN")
             lines.append("-" * W)
+            lines.append("  NOTE: These blocks model signal-path transitions (vias, pads, etc.)")
+            lines.append("  and are NOT part of the default same-layer Klopfenstein taper body.")
+            lines.append("  For same-layer microstrip tapers with continuous ground, these")
+            lines.append("  blocks are not needed and should not be included.")
+            lines.append("")
             for b in blocks:
                 lines.append(f"  [{b.position.upper()}][{b.index}] {b.name}")
                 for k, v in b.params.items():
@@ -363,10 +375,13 @@ class TaperReport:
 
         # --- S-parameter summary ---
         lines.append("-" * W)
-        lines.append("S-PARAMETER SUMMARY")
+        lines.append("S-PARAMETER SUMMARY (generalized, unequal-port references)")
         lines.append("-" * W)
-        lines.append(f"  Max |S11|: {self.result.max_s11_db:.2f} dB")
-        lines.append(f"  Worst insertion loss: {self.result.max_insertion_loss_db:.2f} dB")
+        lines.append(f"  Port 1 reference: z01 = {self.result.z01:.2f} Ω (ZS)")
+        lines.append(f"  Port 2 reference: z02 = {self.result.z02:.2f} Ω (ZL)")
+        lines.append(f"  Max |S11| (input RL):  {self.result.max_s11_db:.2f} dB")
+        lines.append(f"  Max |S22| (output RL): {self.result.max_s22_db:.2f} dB")
+        lines.append(f"  Worst insertion loss:  {self.result.max_insertion_loss_db:.2f} dB")
         lines.append("")
 
         # --- S-parameter table (sampled) ---
@@ -374,7 +389,7 @@ class TaperReport:
         lines.append("S-PARAMETER DATA (sampled)")
         lines.append("-" * W)
         lines.append(f"  {'f (GHz)':>10s}  {'|S11| dB':>10s}  {'|S21| dB':>10s}  "
-                      f"{'∠S11 (°)':>10s}  {'∠S21 (°)':>10s}")
+                      f"{'|S22| dB':>10s}  {'∠S21 (°)':>10s}")
         lines.append(f"  {'--------':>10s}  {'--------':>10s}  {'--------':>10s}  "
                       f"{'--------':>10s}  {'--------':>10s}")
 
@@ -386,14 +401,14 @@ class TaperReport:
             d = fd[i]
             lines.append(
                 f"  {d.f_hz/1e9:10.3f}  {d.s11_db:10.2f}  {d.s21_db:10.2f}  "
-                f"{d.s11_phase_deg:10.1f}  {d.s21_phase_deg:10.1f}"
+                f"{d.s22_db:10.2f}  {d.s21_phase_deg:10.1f}"
             )
         # Always include last point
         if (n - 1) % step != 0:
             d = fd[-1]
             lines.append(
                 f"  {d.f_hz/1e9:10.3f}  {d.s11_db:10.2f}  {d.s21_db:10.2f}  "
-                f"{d.s11_phase_deg:10.1f}  {d.s21_phase_deg:10.1f}"
+                f"{d.s22_db:10.2f}  {d.s21_phase_deg:10.1f}"
             )
         lines.append("")
 
@@ -501,7 +516,11 @@ class TaperReport:
                 "tand": ma.tand_treatment,
             },
             "s_params_summary": {
+                "convention": "Generalized S-parameters with unequal port references",
+                "z01_ohm": self.result.z01,
+                "z02_ohm": self.result.z02,
                 "max_s11_db": self.result.max_s11_db,
+                "max_s22_db": self.result.max_s22_db,
                 "worst_insertion_loss_db": self.result.max_insertion_loss_db,
             },
             "s_params_data": [
@@ -509,8 +528,10 @@ class TaperReport:
                     "f_hz": d.f_hz,
                     "s11_db": d.s11_db,
                     "s21_db": d.s21_db,
+                    "s22_db": d.s22_db,
                     "s11_phase_deg": d.s11_phase_deg,
                     "s21_phase_deg": d.s21_phase_deg,
+                    "s22_phase_deg": d.s22_phase_deg,
                 }
                 for d in fd
             ],

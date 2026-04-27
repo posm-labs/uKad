@@ -1,4 +1,8 @@
-"""Signal via self-block — pi-network model.
+"""Signal via transition block — pi-network model for a via IN the RF signal path.
+
+This block models a signal via that carries the RF signal through a layer
+transition (e.g., top microstrip to bottom microstrip).  It is NOT for
+modeling nearby via fences or ground-stitching vias that do not carry signal.
 
 Topology:  C_barrel/2  —  (R_barrel + jωL_barrel)  —  C_barrel/2
 
@@ -21,8 +25,11 @@ from rfcore.network import Mat2, abcd_shunt_y, abcd_series_z
 from rfcore.materials_ro4350b import MU_0, EPS_0, C_0
 
 
-class SignalViaSelfBlock(DiscontinuityBlock):
-    """Signal via barrel — pi-network model.
+
+
+
+class SignalViaTransitionBlock(DiscontinuityBlock):
+    """Signal via transition — pi-network model for a via in the RF path.
 
     Parameters
     ----------
@@ -110,7 +117,7 @@ class SignalViaSelfBlock(DiscontinuityBlock):
 
     def params(self) -> Dict:
         return {
-            "block": "SignalViaSelf",
+            "block": "SignalViaTransition",
             "d_finished_m": self.d,
             "h_barrel_m": self.h,
             "d_antipad_m": self.d_antipad,
@@ -119,3 +126,7 @@ class SignalViaSelfBlock(DiscontinuityBlock):
             "L_barrel_H": self.L_barrel,
             "C_barrel_F": self.C_barrel,
         }
+
+
+# Backward-compatible alias for existing code
+SignalViaSelfBlock = SignalViaTransitionBlock

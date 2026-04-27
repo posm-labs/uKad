@@ -128,11 +128,11 @@ class TestPipelineWithDiscontinuities:
             right_blocks=right_blocks,
         )
 
-        # Report should include block breakdown
+        # Report should include launch/transition section
         text = report.to_text()
-        assert "DISCONTINUITY BLOCKS" in text
+        assert "OPTIONAL LAUNCH / TRANSITION CHAIN" in text
         assert "PadBlock" in text
-        assert "SignalViaSelfBlock" in text
+        assert "SignalViaTransitionBlock" in text
         assert "ReturnPathBlock" in text
 
         d = json.loads(report.to_json())
@@ -288,3 +288,253 @@ class TestWarningPropagation:
 
         text = report.to_text()
         assert "LOW CONFIDENCE" in text
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Live insertion: board-coordinate placement
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestLiveInsertion:
+    """Test that prepare_insertion generates correctly-placed polygons."""
+
+    def _make_profile(self):
+        from rfcore.microstrip import MicrostripModel
+        from rfcore.klopfenstein import KlopfensteinProfile
+
+        settings = RFProjectSettings()
+        ms = MicrostripModel.from_settings(settings)
+        return KlopfensteinProfile(
+            ZS=50, ZL=75, Gamma_m=0.05,
+            microstrip=ms, f_min=1e9,
+        )
+
+    def _make_selection(self, sx_mm, sy_mm, ex_mm, ey_mm,
+                        w_start_mm=0.507, w_end_mm=0.220):
+        from addon.selection import manual_selection
+        return manual_selection(sx_mm, sy_mm, ex_mm, ey_mm,
+                                w_start_mm, w_end_mm)
+
+    def test_polygon_anchored_at_start(self):
+        """Polygon must start near the selected start point."""
+        from addon.live_insert import prepare_insertion
+
+        profile = self._make_profile()
+        sel = self._make_selection(50, 30, 120, 30)  # horizontal
+        plan = prepare_insertion(profile, sel, overlap_m=0)
+
+        # First left+right vertices should be at x ≈ 50mm, y ≈ 30mm
+        first_left = plan.polygon.left_edge[0]
+        first_right = plan.polygon.right_edge[0]
+        cx = (first_left[0] + first_right[0]) / 2
+        cy = (first_left[1] + first_right[1]) / 2
+        assert abs(cx - 0.050) < 1e-6, f"Start X: expected 50mm, got {cx*1e3:.3f}mm"
+        assert abs(cy - 0.030) < 1e-6, f"Start Y: expected 30mm, got {cy*1e3:.3f}mm"
+
+    def test_polygon_oriented_toward_end(self):
+        """Polygon centerline must point toward the selected end."""
+        from addon.live_insert import prepare_insertion
+
+        profile = self._make_profile()
+        # Horizontal: start (50,30), end (120,30)
+        sel = self._make_selection(50, 30, 120, 30)
+        plan = prepare_insertion(profile, sel, overlap_m=0)
+
+        # Tangent should be (1, 0) for horizontal
+        assert abs(plan.tangent[0] - 1.0) < 1e-6
+        assert abs(plan.tangent[1] - 0.0) < 1e-6
+
+        # Last center should be at x > 50mm (progressing rightward)
+        last_left = plan.polygon.left_edge[-1]
+        last_right = plan.polygon.right_edge[-1]
+        end_cx = (last_left[0] + last_right[0]) / 2
+        assert end_cx > 0.050, "Polygon should extend rightward"
+
+    def test_polygon_oriented_diagonal(self):
+        """Polygon tangent correct for 45-degree diagonal."""
+        from addon.live_insert import prepare_insertion
+
+        profile = self._make_profile()
+        # 45°: start (50,30), end (120,100)
+        sel = self._make_selection(50, 30, 120, 100)
+        plan = prepare_insertion(profile, sel, overlap_m=0)
+
+        expected_tx = 1.0 / math.sqrt(2)
+        expected_ty = 1.0 / math.sqrt(2)
+        assert abs(plan.tangent[0] - expected_tx) < 0.01
+        assert abs(plan.tangent[1] - expected_ty) < 0.01
+
+    def test_length_is_rf_synthesized(self):
+        """Taper length should be profile.L, not gap length."""
+        from addon.live_insert import prepare_insertion
+
+        profile = self._make_profile()
+        # Gap much longer than taper
+        sel = self._make_selection(0, 0, 500, 0)
+        plan = prepare_insertion(profile, sel)
+
+        assert abs(plan.L_actual_m - profile.L) < 1e-9
+        assert plan.L_actual_m < plan.L_gap_m  # gap > taper
+
+    def test_gap_match_detected(self):
+        """When gap ≈ L_actual, both endpoints should connect."""
+        from addon.live_insert import prepare_insertion
+
+        profile = self._make_profile()
+        L_mm = profile.L * 1e3
+        sel = self._make_selection(50, 30, 50 + L_mm, 30)
+        plan = prepare_insertion(profile, sel)
+
+        assert plan.gap_matches
+        assert plan.connects_end
+
+    def test_gap_too_short_warning(self):
+        """Short gap should warn and not connect end."""
+        from addon.live_insert import prepare_insertion
+
+        profile = self._make_profile()
+        sel = self._make_selection(50, 30, 60, 30)  # 10mm gap, way too short
+        plan = prepare_insertion(profile, sel)
+
+        assert not plan.connects_end
+        assert any("exceeds" in w for w in plan.warnings)
+
+    def test_gap_too_long_warning(self):
+        """Long gap should warn and not connect end."""
+        from addon.live_insert import prepare_insertion
+
+        profile = self._make_profile()
+        sel = self._make_selection(0, 0, 500, 0)  # 500mm gap
+        plan = prepare_insertion(profile, sel)
+
+        assert not plan.connects_end
+        assert any("longer than taper" in w for w in plan.warnings)
+
+    def test_overlap_extends_polygon(self):
+        """Overlap should add vertices beyond start/end."""
+        from addon.live_insert import prepare_insertion
+
+        profile = self._make_profile()
+        L_mm = profile.L * 1e3
+        sel = self._make_selection(50, 30, 50 + L_mm, 30)
+
+        plan_no_overlap = prepare_insertion(profile, sel, overlap_m=0)
+        plan_overlap = prepare_insertion(profile, sel, overlap_m=25e-6)
+
+        # With overlap, more vertices
+        assert len(plan_overlap.polygon.outline) > len(plan_no_overlap.polygon.outline)
+
+    def test_start_width_matches_profile(self):
+        """Layout width at start should match profile."""
+        from addon.live_insert import prepare_insertion
+
+        profile = self._make_profile()
+        sel = self._make_selection(50, 30, 120, 30)
+        plan = prepare_insertion(profile, sel)
+
+        assert abs(plan.w_start_m - float(profile.w_layout[0])) < 1e-9
+
+    def test_layer_and_net_from_selection(self):
+        """Layer and net should come from selection."""
+        from addon.live_insert import prepare_insertion
+
+        profile = self._make_profile()
+        sel = self._make_selection(50, 30, 120, 30)
+        sel.layer = "B.Cu"
+        sel.net_name = "RF_SIG"
+        plan = prepare_insertion(profile, sel)
+
+        assert plan.layer == "B.Cu"
+        assert plan.net_name == "RF_SIG"
+
+    def test_debug_summary_contains_key_info(self):
+        """Debug summary should contain all critical placement data."""
+        from addon.live_insert import prepare_insertion
+
+        profile = self._make_profile()
+        sel = self._make_selection(50, 30, 120, 30)
+        plan = prepare_insertion(profile, sel)
+
+        summary = plan.debug_summary()
+        assert "Start point" in summary
+        assert "Predicted end" in summary
+        assert "L_gap" in summary
+        assert "L_actual" in summary
+        assert "BBox" in summary
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Regression: numpy type coercion in kicad_compat
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestKicadCompatCoercion:
+    """Ensure kicad_compat unit helpers accept numpy numeric types.
+
+    Unit conversion is now pure Python (no pcbnew.FromMM), so these
+    tests run without KiCad.  The key invariant: numpy.float64 inputs
+    must produce native Python int outputs.
+    """
+
+    def test_from_mm_numpy_float64(self):
+        """from_mm must accept np.float64 and return Python int."""
+        from addon.kicad_compat import from_mm
+
+        val = np.float64(1.23)
+        result = from_mm(val)
+        assert isinstance(result, int)
+        assert result == 1230000  # 1.23 mm * 1e6
+
+    def test_from_m_numpy_float64(self):
+        """from_m must accept np.float64 and return Python int."""
+        from addon.kicad_compat import from_m
+
+        val = np.float64(0.00123)  # 1.23 mm
+        result = from_m(val)
+        assert isinstance(result, int)
+        assert result == 1230000  # 0.00123 m * 1e9
+
+    def test_to_mm_returns_float(self):
+        """to_mm must return native Python float."""
+        from addon.kicad_compat import to_mm
+
+        result = to_mm(1500000)
+        assert isinstance(result, float)
+        assert result == 1.5
+
+    def test_to_m_returns_float(self):
+        """to_m must return native Python float."""
+        from addon.kicad_compat import to_m
+
+        result = to_m(1500000000)
+        assert isinstance(result, float)
+        assert result == 1.5
+
+    def test_roundtrip_mm(self):
+        """mm -> IU -> mm must round-trip."""
+        from addon.kicad_compat import from_mm, to_mm
+
+        for val in [0.1, 0.507, 1.23, 50.0]:
+            iu = from_mm(val)
+            back = to_mm(iu)
+            assert abs(back - val) < 1e-6, f"Round-trip failed for {val}"
+
+    def test_polygon_coordinates_are_native_float(self):
+        """Polygon outline coordinates from numpy arrays must coerce."""
+        from rfcore.export.geometry import generate_taper_polygon
+        from rfcore.klopfenstein import KlopfensteinProfile
+        from rfcore.microstrip import MicrostripModel
+        from rfcore.config import RFProjectSettings
+
+        s = RFProjectSettings()
+        ms = MicrostripModel.from_settings(s)
+        prof = KlopfensteinProfile(
+            ZS=50, ZL=75, Gamma_m=0.05,
+            microstrip=ms, f_min=1e9,
+        )
+        poly = generate_taper_polygon(prof)
+
+        for x, y in poly.outline:
+            fx = float(x)
+            fy = float(y)
+            assert isinstance(fx, float)
+            assert isinstance(fy, float)
+

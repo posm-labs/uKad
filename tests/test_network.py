@@ -162,3 +162,199 @@ class TestUtilities:
     def test_s_to_db_zero(self):
         result = s_to_db(0.0)
         assert result < -200
+
+
+class TestGeneralizedSConversion:
+    """Tests for abcd_to_s_gen with unequal port references."""
+
+    def test_equal_refs_matches_standard(self):
+        """abcd_to_s_gen(M, z0, z0) == abcd_to_s(M, z0)."""
+        from rfcore.network import abcd_to_s_gen
+        z0 = 50.0
+        m = abcd_tline(75.0, complex(0.02, 2.0))
+        s_std = abcd_to_s(m, z0)
+        s_gen = abcd_to_s_gen(m, z0, z0)
+        np.testing.assert_allclose(s_gen, s_std, atol=1e-14)
+
+    def test_identity_unequal_refs(self):
+        """Identity ABCD with z01≠z02: S11 = (z02-z01)/(z02+z01)."""
+        from rfcore.network import abcd_to_s_gen
+        z01, z02 = 50.0, 75.0
+        m = abcd_identity()
+        s = abcd_to_s_gen(m, z01, z02)
+        # A through-connection between different reference planes
+        # S11 = (z02 - z01) / (z02 + z01) for identity ABCD
+        gamma_expected = (z02 - z01) / (z02 + z01)
+        np.testing.assert_allclose(s[0, 0].real, gamma_expected, atol=1e-14)
+        np.testing.assert_allclose(s[0, 0].imag, 0.0, atol=1e-14)
+
+    def test_quarter_wave_transformer_s11_zero(self):
+        """λ/4 of √(z01·z02) between z01 and z02: S11 = 0."""
+        from rfcore.network import abcd_to_s_gen
+        z01, z02 = 50.0, 100.0
+        zc = math.sqrt(z01 * z02)
+        gamma_l = 1j * math.pi / 2  # quarter wave
+        m = abcd_tline(zc, gamma_l)
+        s = abcd_to_s_gen(m, z01, z02)
+        np.testing.assert_allclose(abs(s[0, 0]), 0.0, atol=1e-13)
+        np.testing.assert_allclose(abs(s[1, 1]), 0.0, atol=1e-13)
+
+    def test_reciprocity(self):
+        """S12 = S21 for reciprocal network with equal port refs."""
+        from rfcore.network import abcd_to_s_gen
+        m = abcd_tline(60.0, complex(0.01, 1.2))
+        s = abcd_to_s_gen(m, 50.0, 50.0)
+        np.testing.assert_allclose(s[0, 1], s[1, 0], atol=1e-14)
+
+
+class TestTransformerPortReference:
+    """Regression tests for the port-reference convention bug.
+
+    A 50→75 Ω Klopfenstein taper evaluated with scalar z_ref=50 Ω
+    shows a false S11 floor at (75-50)/(75+50) = 0.2 → -13.98 dB.
+    With correct unequal-port references (z01=50, z02=75), the
+    ideal taper should achieve max |S11| ≈ Γm.
+    """
+
+    @pytest.fixture
+    def ideal_ms(self):
+        """Nondispersive lossless microstrip for pure Klopfenstein test."""
+        from rfcore.microstrip import MicrostripModel
+        from rfcore.materials_ro4350b import RO4350B
+
+        class _Ideal(MicrostripModel):
+            def _dispersion_eeff(self, w, f, eeff_static):
+                return eeff_static
+            def _dispersion_zc(self, w, f, zc_static, eeff_static, eeff_f):
+                return zc_static
+            def _alpha_c(self, w, f, zc):
+                return 0.0
+            def _alpha_d(self, f, eeff_f):
+                return 0.0
+            def _roughness_factor(self, f):
+                return 1.0
+
+        return _Ideal(
+            h=RO4350B.thickness_10mil_m,
+            er=RO4350B.dk_process_10ghz,
+            tand=0.0, t=RO4350B.cu_1oz_thickness_m,
+            sigma=1e30, roughness=0.0,
+        )
+
+    def test_ideal_klopfenstein_hits_gamma_m(self, ideal_ms):
+        """Ideal nondispersive lossless 50→75 Ω Klopfenstein:
+        max |S11| should match Γm = 0.05 (-26.02 dB) with correct port refs.
+        """
+        from rfcore.klopfenstein import KlopfensteinProfile
+        from rfcore.taper_assembly import TaperAssembly
+        from rfcore.config import RFProjectSettings
+
+        settings = RFProjectSettings()
+        settings.analysis.f_start_hz = 1e9
+        settings.analysis.f_stop_hz = 10e9
+        settings.analysis.n_points = 201
+
+        prof = KlopfensteinProfile(
+            ZS=50.0, ZL=75.0, Gamma_m=0.05,
+            microstrip=ideal_ms, f_min=1e9, f_geom=1e9,
+            length_margin=2.0,
+        )
+        assy = TaperAssembly(
+            settings=settings, profile=prof, microstrip=ideal_ms,
+        )
+        result = assy.evaluate()
+
+        # Port references must be correct
+        assert result.z01 == 50.0
+        assert result.z02 == 75.0
+
+        # Max |S11| with correct refs should be close to -26.02 dB
+        target_db = 20 * math.log10(0.05)  # -26.02
+        assert abs(result.max_s11_db - target_db) < 0.5, (
+            f"Expected max |S11| near {target_db:.2f} dB, got {result.max_s11_db:.2f} dB"
+        )
+
+    def test_scalar_50ohm_ref_shows_false_floor(self, ideal_ms):
+        """Same taper with scalar z_ref=50 Ω must show the false -14 dB floor.
+        This test exists to prove the bug existed and is now caught.
+        """
+        from rfcore.klopfenstein import KlopfensteinProfile
+        from rfcore.taper_assembly import TaperAssembly
+        from rfcore.taper_body import build_segments, evaluate_body
+        from rfcore.network import abcd_to_s, abcd_to_s_gen
+        from rfcore.config import RFProjectSettings
+
+        settings = RFProjectSettings()
+        settings.analysis.f_start_hz = 1e9
+        settings.analysis.f_stop_hz = 10e9
+        settings.analysis.n_points = 201
+
+        prof = KlopfensteinProfile(
+            ZS=50.0, ZL=75.0, Gamma_m=0.05,
+            microstrip=ideal_ms, f_min=1e9, f_geom=1e9,
+            length_margin=2.0,
+        )
+        segs = build_segments(prof, ideal_ms, f_stop=10e9, segmentation_tol=1.0)
+        freqs = np.linspace(1e9, 10e9, 201)
+
+        max_s11_wrong = -300.0
+        max_s11_correct = -300.0
+
+        for f in freqs:
+            body = evaluate_body(segs, ideal_ms, f, 50.0)
+            abcd = body.abcd
+
+            # WRONG: scalar 50 Ω ref for both ports
+            s_wrong = abcd_to_s(abcd, 50.0)
+            db_wrong = 20.0 * np.log10(max(abs(s_wrong[0, 0]), 1e-30))
+            max_s11_wrong = max(max_s11_wrong, db_wrong)
+
+            # CORRECT: z01=50, z02=75
+            s_correct = abcd_to_s_gen(abcd, 50.0, 75.0)
+            db_correct = 20.0 * np.log10(max(abs(s_correct[0, 0]), 1e-30))
+            max_s11_correct = max(max_s11_correct, db_correct)
+
+        # Wrong reference should show the false floor near -14 dB
+        false_floor_db = 20 * math.log10(abs((75 - 50) / (75 + 50)))  # -13.98
+        assert abs(max_s11_wrong - false_floor_db) < 1.0, (
+            f"Expected false floor near {false_floor_db:.2f} dB, "
+            f"got {max_s11_wrong:.2f} dB"
+        )
+
+        # Correct reference should be near -26 dB
+        target_db = 20 * math.log10(0.05)
+        assert abs(max_s11_correct - target_db) < 0.5, (
+            f"Expected max |S11| near {target_db:.2f} dB, got {max_s11_correct:.2f} dB"
+        )
+
+    def test_gamma_in_matches_generalized_s11(self, ideal_ms):
+        """Γ_in from ABCD with explicit ZL termination must match S11_gen."""
+        from rfcore.klopfenstein import KlopfensteinProfile
+        from rfcore.taper_body import build_segments, evaluate_body
+        from rfcore.network import abcd_to_s_gen
+
+        prof = KlopfensteinProfile(
+            ZS=50.0, ZL=75.0, Gamma_m=0.05,
+            microstrip=ideal_ms, f_min=1e9, f_geom=1e9,
+            length_margin=1.5,
+        )
+        segs = build_segments(prof, ideal_ms, f_stop=10e9, segmentation_tol=1.0)
+        freqs = np.linspace(1e9, 10e9, 21)
+
+        for f in freqs:
+            body = evaluate_body(segs, ideal_ms, f, 50.0)
+            abcd = body.abcd
+            A, B, C, D = abcd[0, 0], abcd[0, 1], abcd[1, 0], abcd[1, 1]
+
+            # Explicit Gamma_in
+            ZL = 75.0
+            Zin = (A * ZL + B) / (C * ZL + D)
+            gamma_in = (Zin - 50.0) / (Zin + 50.0)
+
+            # Generalized S11
+            s = abcd_to_s_gen(abcd, 50.0, 75.0)
+
+            np.testing.assert_allclose(
+                abs(gamma_in), abs(s[0, 0]), atol=1e-12,
+                err_msg=f"Gamma_in vs S11_gen mismatch at f={f/1e9:.1f} GHz"
+            )

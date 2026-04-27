@@ -19,6 +19,13 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
 ]
+plot = [
+    "matplotlib>=3.5",
+]
+ui = [
+    "wxPython>=4.2",
+    "matplotlib>=3.5",
+]
 em = [
     "CSXCAD>=0.6",
     "openEMS>=0.0.35",

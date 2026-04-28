@@ -1,9 +1,9 @@
 """Track selection and geometry inference for KiCad PCB editor.
 
-Reads the current board selection and infers taper endpoint geometry.
+v1 workflow: ONE-TRACE KLOPFENSTEIN LAUNCH
 
-Mode A (automatic): Two tracks selected on same layer → infer everything.
-Mode B (manual): Ambiguous selection → provide defaults for manual override.
+User selects exactly one input track.  The plugin infers the launch
+endpoint, width, layer, net, and direction.  No output trace is needed.
 
 All KiCad interaction goes through ``addon.kicad_compat`` — this module
 does NOT import ``pcbnew`` directly.
@@ -13,36 +13,31 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 
 @dataclass
 class SelectionResult:
-    """Result of inferring taper endpoints from board selection.
+    """Result of inferring launch geometry from board selection.
 
     Coordinates are in metres.  Angles are in degrees.
     """
     mode: str = "manual"        # "auto" or "manual"
     valid: bool = False         # True if enough info to proceed
+
+    # Layer / net
     layer: str = "F.Cu"
     net_name: str = ""
 
-    # Endpoint positions (metres)
-    start_x_m: float = 0.0
-    start_y_m: float = 0.0
-    end_x_m: float = 0.0
-    end_y_m: float = 0.0
+    # Launch point — free endpoint of the selected track (metres)
+    launch_x_m: float = 0.0
+    launch_y_m: float = 0.0
 
-    # Endpoint widths (metres)
-    start_width_m: float = 0.0
-    end_width_m: float = 0.0
+    # Launch direction — tangent pointing away from track (degrees)
+    launch_tangent_deg: float = 0.0
 
-    # Direction tangents (direction taper extends from each endpoint)
-    start_tangent_deg: float = 0.0
-    end_tangent_deg: float = 180.0
-
-    # Computed properties
-    distance_m: float = 0.0    # straight-line distance between endpoints
+    # Track width at launch endpoint (metres)
+    track_width_m: float = 0.0
 
     # Info / warnings
     warnings: List[str] = field(default_factory=list)
@@ -50,10 +45,11 @@ class SelectionResult:
 
 
 def infer_from_selection(board) -> SelectionResult:
-    """Infer taper endpoints from current board selection.
+    """Infer taper launch geometry from current board selection.
 
-    Requires exactly 2 track segments on the same copper layer.
-    All KiCad interaction goes through ``addon.kicad_compat``.
+    Requires exactly 1 selected track segment.
+    The launch point is the track's free end (the endpoint NOT shared
+    with another track on the board).
 
     Parameters
     ----------
@@ -75,146 +71,130 @@ def infer_from_selection(board) -> SelectionResult:
         return result
 
     if len(selected) == 0:
-        result.warnings.append("No tracks selected. Use manual mode.")
+        result.warnings.append("No tracks selected. Select one input track.")
         return result
 
-    if len(selected) == 1:
-        t = selected[0]
-        result.layer = t.layer_name
-        result.net_name = t.net_name
-        result.start_width_m = to_m(t.width)
-        result.info.append(
-            f"Single track selected: layer={result.layer}, "
-            f"net={result.net_name}, width={result.start_width_m*1e3:.3f}mm. "
-            f"Select a second track for automatic mode."
-        )
-        return result
-
-    if len(selected) > 2:
+    if len(selected) > 1:
         result.warnings.append(
-            f"{len(selected)} tracks selected — expected 2. "
-            f"Select exactly 2 tracks for automatic mode."
+            f"{len(selected)} tracks selected — select exactly 1 input track. "
+            f"Using first selected track."
         )
-        selected = selected[:2]
 
-    t1, t2 = selected[0], selected[1]
+    t = selected[0]
 
-    # Check same layer
-    if t1.layer_name != t2.layer_name:
+    result.layer = t.layer_name
+    result.net_name = t.net_name
+    result.track_width_m = to_m(t.width)
+
+    # ── Find the free endpoint ──
+    # The "free end" is the endpoint of the selected track that is NOT
+    # shared with any other track on the same layer.  The taper launches
+    # from this free end outward.
+    start = (t.start_x, t.start_y)
+    end = (t.end_x, t.end_y)
+
+    start_connected = _is_endpoint_connected(board, t, start)
+    end_connected = _is_endpoint_connected(board, t, end)
+
+    if start_connected and not end_connected:
+        # End is free — launch from end, direction = start→end
+        launch = end
+        anchor = start
+    elif end_connected and not start_connected:
+        # Start is free — launch from start, direction = end→start
+        launch = start
+        anchor = end
+    elif not start_connected and not end_connected:
+        # Neither connected — use end as launch (arbitrary, warn)
+        launch = end
+        anchor = start
         result.warnings.append(
-            f"Selected tracks are on different layers "
-            f"({t1.layer_name}, {t2.layer_name}). "
-            f"Taper requires same-layer tracks."
+            "Neither track endpoint is connected to other copper. "
+            "Launching from track end point. Override direction if needed."
         )
-        result.layer = t1.layer_name
-        return result
-
-    result.layer = t1.layer_name
-
-    # Check net
-    if t1.net_name and t2.net_name and t1.net_name != t2.net_name:
+    else:
+        # Both connected — use end as launch (arbitrary, warn)
+        launch = end
+        anchor = start
         result.warnings.append(
-            f"Selected tracks have different nets "
-            f"({t1.net_name}, {t2.net_name}). "
-            f"Confirm the desired net."
+            "Both track endpoints are connected to other copper. "
+            "Launching from track end point. Override direction if needed."
         )
-    result.net_name = t1.net_name or t2.net_name or ""
 
-    # ── Find closest unconnected endpoints ──
-    # Each track has (start, end).  We want the pair of endpoints
-    # (one from each track) that are closest — those define the gap
-    # where the taper will be inserted.
-    endpoints = [
-        ((t1.start_x, t1.start_y), (t1.end_x, t1.end_y),
-         (t2.start_x, t2.start_y), (t2.end_x, t2.end_y)),
-        ((t1.start_x, t1.start_y), (t1.end_x, t1.end_y),
-         (t2.end_x, t2.end_y), (t2.start_x, t2.start_y)),
-        ((t1.end_x, t1.end_y), (t1.start_x, t1.start_y),
-         (t2.start_x, t2.start_y), (t2.end_x, t2.end_y)),
-        ((t1.end_x, t1.end_y), (t1.start_x, t1.start_y),
-         (t2.end_x, t2.end_y), (t2.start_x, t2.start_y)),
-    ]
+    result.launch_x_m = to_m(launch[0])
+    result.launch_y_m = to_m(launch[1])
 
-    best = None
-    best_dist = float("inf")
-    for gap1, anchor1, gap2, anchor2 in endpoints:
-        dx = gap1[0] - gap2[0]
-        dy = gap1[1] - gap2[1]
-        dist = math.sqrt(dx * dx + dy * dy)
-        if dist < best_dist:
-            best_dist = dist
-            best = (gap1, anchor1, gap2, anchor2)
-
-    gap1, anchor1, gap2, anchor2 = best
-
-    # Taper start = gap endpoint of track 1
-    result.start_x_m = to_m(gap1[0])
-    result.start_y_m = to_m(gap1[1])
-    result.start_width_m = to_m(t1.width)
-
-    # Taper end = gap endpoint of track 2
-    result.end_x_m = to_m(gap2[0])
-    result.end_y_m = to_m(gap2[1])
-    result.end_width_m = to_m(t2.width)
-
-    # Compute tangent directions
-    dx1 = gap1[0] - anchor1[0]
-    dy1 = gap1[1] - anchor1[1]
-    result.start_tangent_deg = math.degrees(math.atan2(dy1, dx1))
-
-    dx2 = gap2[0] - anchor2[0]
-    dy2 = gap2[1] - anchor2[1]
-    result.end_tangent_deg = math.degrees(math.atan2(dy2, dx2))
-
-    # Distance
-    dx = result.end_x_m - result.start_x_m
-    dy = result.end_y_m - result.start_y_m
-    result.distance_m = math.sqrt(dx * dx + dy * dy)
+    # Tangent direction: from anchor toward launch point (pointing outward)
+    dx = launch[0] - anchor[0]
+    dy = launch[1] - anchor[1]
+    if abs(dx) > 0 or abs(dy) > 0:
+        result.launch_tangent_deg = math.degrees(math.atan2(dy, dx))
+    else:
+        result.launch_tangent_deg = 0.0
+        result.warnings.append("Track has zero length. Direction defaulting to 0°.")
 
     result.mode = "auto"
     result.valid = True
 
     result.info.append(
-        f"Auto mode: {result.layer}, net={result.net_name}, "
-        f"distance={result.distance_m*1e3:.2f}mm, "
-        f"w_start={result.start_width_m*1e3:.3f}mm, "
-        f"w_end={result.end_width_m*1e3:.3f}mm"
+        f"Auto: {result.layer}, net='{result.net_name}', "
+        f"w={result.track_width_m*1e3:.4f}mm, "
+        f"launch=({result.launch_x_m*1e3:.2f}, {result.launch_y_m*1e3:.2f})mm, "
+        f"dir={result.launch_tangent_deg:.1f}°"
     )
 
     return result
 
 
+def _is_endpoint_connected(board, track_info, endpoint_iu) -> bool:
+    """Check if a track endpoint is shared with another track on the board."""
+    from addon.kicad_compat import get_all_tracks
+
+    ex, ey = endpoint_iu
+    # Tolerance: 1 IU (1 nm)
+    tol = 1
+
+    for other in get_all_tracks(board):
+        # Skip self
+        if (other.start_x == track_info.start_x and
+            other.start_y == track_info.start_y and
+            other.end_x == track_info.end_x and
+            other.end_y == track_info.end_y and
+            other.width == track_info.width):
+            continue
+
+        # Same layer check
+        if other.layer_name != track_info.layer_name:
+            continue
+
+        # Check if any endpoint of other track matches
+        if (abs(other.start_x - ex) <= tol and abs(other.start_y - ey) <= tol):
+            return True
+        if (abs(other.end_x - ex) <= tol and abs(other.end_y - ey) <= tol):
+            return True
+
+    return False
+
+
 def manual_selection(
-    start_x_mm: float, start_y_mm: float,
-    end_x_mm: float, end_y_mm: float,
-    start_width_mm: float, end_width_mm: float,
+    launch_x_mm: float, launch_y_mm: float,
+    track_width_mm: float,
+    angle_deg: float = 0.0,
     layer: str = "F.Cu",
     net_name: str = "",
-    angle_deg: float = 0.0,
 ) -> SelectionResult:
-    """Create a SelectionResult from manual user input.
+    """Create a SelectionResult from manual user input (for tests/headless).
 
     All coordinates and widths in mm.
     """
-    dx = (end_x_mm - start_x_mm) * 1e-3
-    dy = (end_y_mm - start_y_mm) * 1e-3
-    distance_m = math.sqrt(dx * dx + dy * dy)
-
-    computed_angle = math.degrees(math.atan2(dy, dx)) if distance_m > 0 else angle_deg
-
     return SelectionResult(
         mode="manual",
         valid=True,
         layer=layer,
         net_name=net_name,
-        start_x_m=start_x_mm * 1e-3,
-        start_y_m=start_y_mm * 1e-3,
-        end_x_m=end_x_mm * 1e-3,
-        end_y_m=end_y_mm * 1e-3,
-        start_width_m=start_width_mm * 1e-3,
-        end_width_m=end_width_mm * 1e-3,
-        start_tangent_deg=computed_angle,
-        end_tangent_deg=computed_angle + 180.0,
-        distance_m=distance_m,
-        info=[f"Manual mode: distance={distance_m*1e3:.2f}mm"],
+        launch_x_m=launch_x_mm * 1e-3,
+        launch_y_m=launch_y_mm * 1e-3,
+        launch_tangent_deg=angle_deg,
+        track_width_m=track_width_mm * 1e-3,
+        info=[f"Manual: w={track_width_mm:.4f}mm, dir={angle_deg:.1f}°"],
     )

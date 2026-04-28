@@ -291,11 +291,11 @@ class TestWarningPropagation:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Live insertion: board-coordinate placement
+# One-trace Klopfenstein launch: composite polygon placement
 # ═══════════════════════════════════════════════════════════════════════
 
-class TestLiveInsertion:
-    """Test that prepare_insertion generates correctly-placed polygons."""
+class TestKlopfensteinLaunch:
+    """Test one-trace launch mode: composite polygon in board coordinates."""
 
     def _make_profile(self):
         from rfcore.microstrip import MicrostripModel
@@ -308,158 +308,144 @@ class TestLiveInsertion:
             microstrip=ms, f_min=1e9,
         )
 
-    def _make_selection(self, sx_mm, sy_mm, ex_mm, ey_mm,
-                        w_start_mm=0.507, w_end_mm=0.220):
+    def _make_selection(self, x_mm=100, y_mm=50,
+                        width_mm=0.507, angle_deg=0):
         from addon.selection import manual_selection
-        return manual_selection(sx_mm, sy_mm, ex_mm, ey_mm,
-                                w_start_mm, w_end_mm)
+        return manual_selection(x_mm, y_mm, width_mm, angle_deg)
 
-    def test_polygon_anchored_at_start(self):
-        """Polygon must start near the selected start point."""
+    def test_polygon_anchored_at_launch(self):
+        """RF body should start at the launch point."""
         from addon.live_insert import prepare_insertion
 
         profile = self._make_profile()
-        sel = self._make_selection(50, 30, 120, 30)  # horizontal
-        plan = prepare_insertion(profile, sel, overlap_m=0)
+        sel = self._make_selection(100, 50, angle_deg=0)
+        plan = prepare_insertion(profile, sel, overlap_m=0, landing_m=0)
 
-        # First left+right vertices should be at x ≈ 50mm, y ≈ 30mm
+        # First point center should be at (100, 50) mm
         first_left = plan.polygon.left_edge[0]
         first_right = plan.polygon.right_edge[0]
-        cx = (first_left[0] + first_right[0]) / 2
-        cy = (first_left[1] + first_right[1]) / 2
-        assert abs(cx - 0.050) < 1e-6, f"Start X: expected 50mm, got {cx*1e3:.3f}mm"
-        assert abs(cy - 0.030) < 1e-6, f"Start Y: expected 30mm, got {cy*1e3:.3f}mm"
+        cx = (first_left[0] + first_right[0]) / 2 * 1e3
+        cy = (first_left[1] + first_right[1]) / 2 * 1e3
+        assert abs(cx - 100) < 0.01, f"Expected 100mm, got {cx:.3f}mm"
+        assert abs(cy - 50) < 0.01, f"Expected 50mm, got {cy:.3f}mm"
 
-    def test_polygon_oriented_toward_end(self):
-        """Polygon centerline must point toward the selected end."""
+    def test_overlap_extends_backward(self):
+        """Input overlap should extend backward from launch point."""
         from addon.live_insert import prepare_insertion
 
         profile = self._make_profile()
-        # Horizontal: start (50,30), end (120,30)
-        sel = self._make_selection(50, 30, 120, 30)
-        plan = prepare_insertion(profile, sel, overlap_m=0)
+        sel = self._make_selection(100, 50, angle_deg=0)
+        plan = prepare_insertion(profile, sel, overlap_m=0.001)
 
-        # Tangent should be (1, 0) for horizontal
-        assert abs(plan.tangent[0] - 1.0) < 1e-6
-        assert abs(plan.tangent[1] - 0.0) < 1e-6
+        xs = [p[0]*1e3 for p in plan.polygon.outline]
+        assert min(xs) < 100, "Overlap should extend backward"
 
-        # Last center should be at x > 50mm (progressing rightward)
-        last_left = plan.polygon.left_edge[-1]
-        last_right = plan.polygon.right_edge[-1]
-        end_cx = (last_left[0] + last_right[0]) / 2
-        assert end_cx > 0.050, "Polygon should extend rightward"
-
-    def test_polygon_oriented_diagonal(self):
-        """Polygon tangent correct for 45-degree diagonal."""
+    def test_output_landing_extends_forward(self):
+        """Output landing should extend forward from RF body end."""
         from addon.live_insert import prepare_insertion
 
         profile = self._make_profile()
-        # 45°: start (50,30), end (120,100)
-        sel = self._make_selection(50, 30, 120, 100)
-        plan = prepare_insertion(profile, sel, overlap_m=0)
+        sel = self._make_selection(100, 50, angle_deg=0)
+        plan = prepare_insertion(profile, sel, landing_m=0.001)
 
-        expected_tx = 1.0 / math.sqrt(2)
-        expected_ty = 1.0 / math.sqrt(2)
-        assert abs(plan.tangent[0] - expected_tx) < 0.01
-        assert abs(plan.tangent[1] - expected_ty) < 0.01
+        L_body_mm = profile.L * 1e3
+        xs = [p[0]*1e3 for p in plan.polygon.outline]
+        assert max(xs) > 100 + L_body_mm, "Landing should extend past body"
 
-    def test_length_is_rf_synthesized(self):
-        """Taper length should be profile.L, not gap length."""
+    def test_rf_body_length(self):
+        """RF body length should equal profile.L."""
         from addon.live_insert import prepare_insertion
 
         profile = self._make_profile()
-        # Gap much longer than taper
-        sel = self._make_selection(0, 0, 500, 0)
+        sel = self._make_selection(100, 50)
         plan = prepare_insertion(profile, sel)
 
-        assert abs(plan.L_actual_m - profile.L) < 1e-9
-        assert plan.L_actual_m < plan.L_gap_m  # gap > taper
+        assert abs(plan.L_body_m - profile.L) < 1e-9
 
-    def test_gap_match_detected(self):
-        """When gap ≈ L_actual, both endpoints should connect."""
+    def test_total_length_includes_all_sections(self):
+        """Total = overlap + body + landing."""
         from addon.live_insert import prepare_insertion
 
         profile = self._make_profile()
-        L_mm = profile.L * 1e3
-        sel = self._make_selection(50, 30, 50 + L_mm, 30)
+        sel = self._make_selection(100, 50)
+        plan = prepare_insertion(profile, sel, overlap_m=0.001, landing_m=0.002)
+
+        expected = 0.001 + profile.L + 0.002
+        assert abs(plan.L_total_m - expected) < 1e-9
+
+    def test_board_coordinates_not_origin(self):
+        """Polygon must be in board coordinates, not at origin."""
+        from addon.live_insert import prepare_insertion
+
+        profile = self._make_profile()
+        sel = self._make_selection(150, 80, angle_deg=0)
         plan = prepare_insertion(profile, sel)
 
-        assert plan.gap_matches
-        assert plan.connects_end
+        xs = [p[0]*1e3 for p in plan.polygon.outline]
+        ys = [p[1]*1e3 for p in plan.polygon.outline]
+        assert min(xs) > 100, f"BBox x_min={min(xs):.1f} too close to origin"
+        assert min(ys) > 70, f"BBox y_min={min(ys):.1f} too close to origin"
 
-    def test_gap_too_short_warning(self):
-        """Short gap should warn and not connect end."""
+    def test_diagonal_direction(self):
+        """Polygon should extend in correct diagonal direction."""
         from addon.live_insert import prepare_insertion
 
         profile = self._make_profile()
-        sel = self._make_selection(50, 30, 60, 30)  # 10mm gap, way too short
+        sel = self._make_selection(100, 50, angle_deg=45)
         plan = prepare_insertion(profile, sel)
 
-        assert not plan.connects_end
-        assert any("exceeds" in w for w in plan.warnings)
+        assert plan.predicted_end_xy_m[0] > 0.100
+        assert plan.predicted_end_xy_m[1] > 0.050
 
-    def test_gap_too_long_warning(self):
-        """Long gap should warn and not connect end."""
+    def test_start_width_from_profile(self):
         from addon.live_insert import prepare_insertion
 
         profile = self._make_profile()
-        sel = self._make_selection(0, 0, 500, 0)  # 500mm gap
-        plan = prepare_insertion(profile, sel)
-
-        assert not plan.connects_end
-        assert any("longer than taper" in w for w in plan.warnings)
-
-    def test_overlap_extends_polygon(self):
-        """Overlap should add vertices beyond start/end."""
-        from addon.live_insert import prepare_insertion
-
-        profile = self._make_profile()
-        L_mm = profile.L * 1e3
-        sel = self._make_selection(50, 30, 50 + L_mm, 30)
-
-        plan_no_overlap = prepare_insertion(profile, sel, overlap_m=0)
-        plan_overlap = prepare_insertion(profile, sel, overlap_m=25e-6)
-
-        # With overlap, more vertices
-        assert len(plan_overlap.polygon.outline) > len(plan_no_overlap.polygon.outline)
-
-    def test_start_width_matches_profile(self):
-        """Layout width at start should match profile."""
-        from addon.live_insert import prepare_insertion
-
-        profile = self._make_profile()
-        sel = self._make_selection(50, 30, 120, 30)
+        sel = self._make_selection(100, 50)
         plan = prepare_insertion(profile, sel)
 
         assert abs(plan.w_start_m - float(profile.w_layout[0])) < 1e-9
 
-    def test_layer_and_net_from_selection(self):
-        """Layer and net should come from selection."""
+    def test_end_width_from_profile(self):
         from addon.live_insert import prepare_insertion
 
         profile = self._make_profile()
-        sel = self._make_selection(50, 30, 120, 30)
+        sel = self._make_selection(100, 50)
+        plan = prepare_insertion(profile, sel)
+
+        assert abs(plan.w_end_m - float(profile.w_layout[-1])) < 1e-9
+
+    def test_layer_from_selection(self):
+        from addon.live_insert import prepare_insertion
+
+        profile = self._make_profile()
+        sel = self._make_selection(100, 50)
         sel.layer = "B.Cu"
-        sel.net_name = "RF_SIG"
         plan = prepare_insertion(profile, sel)
 
         assert plan.layer == "B.Cu"
-        assert plan.net_name == "RF_SIG"
 
-    def test_debug_summary_contains_key_info(self):
-        """Debug summary should contain all critical placement data."""
+    def test_width_mismatch_warning(self):
         from addon.live_insert import prepare_insertion
 
         profile = self._make_profile()
-        sel = self._make_selection(50, 30, 120, 30)
+        sel = self._make_selection(100, 50, width_mm=0.200)
+        plan = prepare_insertion(profile, sel)
+
+        assert any("differs" in w for w in plan.warnings)
+
+    def test_debug_summary(self):
+        from addon.live_insert import prepare_insertion
+
+        profile = self._make_profile()
+        sel = self._make_selection(100, 50)
         plan = prepare_insertion(profile, sel)
 
         summary = plan.debug_summary()
-        assert "Start point" in summary
-        assert "Predicted end" in summary
-        assert "L_gap" in summary
-        assert "L_actual" in summary
+        assert "Launch point" in summary
+        assert "L_body" in summary
         assert "BBox" in summary
+
 
 
 # ═══════════════════════════════════════════════════════════════════════

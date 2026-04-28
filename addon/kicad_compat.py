@@ -203,6 +203,33 @@ def get_selected_tracks(board) -> List[TrackInfo]:
     return tracks
 
 
+def get_all_tracks(board) -> List[TrackInfo]:
+    """Return geometry of ALL track segments on the board (for connectivity checks)."""
+    pcbnew = _ensure_pcbnew()
+    tracks: List[TrackInfo] = []
+
+    for item in board.GetTracks():
+        if not isinstance(item, pcbnew.PCB_TRACK):
+            continue
+        if isinstance(item, pcbnew.PCB_VIA):
+            continue
+
+        start = item.GetStart()
+        end = item.GetEnd()
+
+        tracks.append(TrackInfo(
+            start_x=start.x,
+            start_y=start.y,
+            end_x=end.x,
+            end_y=end.y,
+            width=item.GetWidth(),
+            layer_name=item.GetLayerName(),
+            net_name=item.GetNetname(),
+        ))
+
+    return tracks
+
+
 # ---------------------------------------------------------------------------
 # Net lookup
 # ---------------------------------------------------------------------------
@@ -332,18 +359,12 @@ def refill_zone(board, zone) -> None:
     """Refill a single zone.  Call after ``create_taper_zone``."""
     pcbnew = _ensure_pcbnew()
     try:
+        # Fill ALL zones (matches working RF-tools pattern).
+        # This is more reliable than filling a single zone.
         filler = pcbnew.ZONE_FILLER(board)
-        # KiCad 8 SWIG requires a ZONES vector, not a Python list
-        zones_vec = pcbnew.ZONES()
-        zones_vec.append(zone)
-        filler.Fill(zones_vec)
-    except Exception:
-        # Fallback: try Python list (may work on some versions)
-        try:
-            filler = pcbnew.ZONE_FILLER(board)
-            filler.Fill([zone])
-        except Exception as e2:
-            logger.warning(f"Zone refill failed: {e2}")
+        filler.Fill(board.Zones())
+    except Exception as e:
+        logger.warning(f"Zone refill failed: {e}")
 
 
 # ---------------------------------------------------------------------------

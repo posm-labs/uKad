@@ -2,15 +2,19 @@
 
 wxPython dialog with:
   - Parameter panel (left): stackup, electrical, geometry, results
-  - Live footprint preview (right)
+  - Live footprint preview (right, KiCad-like dark canvas)
   - Toolbar: Synthesize, S-Params, Export, EM stub, Stackup, Save, Close
 
 All RF math goes through rfcore (unchanged). This module is UI only.
 """
 
 from __future__ import annotations
+import logging
 import pathlib
+import traceback
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 try:
     import wx
@@ -36,8 +40,13 @@ _C_S11 = "#1f77b4"
 _C_S21 = "#2ca02c"
 _C_S22 = "#d62728"
 _C_TARGET = "#888888"
-_C_TAPER = "#cc7722"
-_C_PAD = "#33aa33"
+# KiCad-like preview colors
+_C_BG = "#1a1a2e"       # dark canvas background
+_C_GRID = "#2a2a4a"     # subtle grid
+_C_COPPER = "#cc3333"   # F.Cu red
+_C_PAD_FILL = "#cc3333" # pad fill (same copper)
+_C_ORIGIN = "#cccccc"   # crosshair
+_C_DIM = "#6688cc"      # dimension annotations
 
 
 class TaperWizard(wx.Dialog):
@@ -150,7 +159,7 @@ class TaperWizard(wx.Dialog):
 
         if HAS_MPL:
             self._fig = Figure(figsize=(5, 4), dpi=100)
-            self._fig.patch.set_facecolor("#f0f0f0")
+            self._fig.patch.set_facecolor(_C_BG)
             self._ax_prev = self._fig.add_subplot(111)
             self._canvas = FigureCanvas(panel, -1, self._fig)
             sizer.Add(self._canvas, 1, wx.EXPAND)
@@ -173,18 +182,19 @@ class TaperWizard(wx.Dialog):
     def _draw_empty_preview(self):
         ax = self._ax_prev
         ax.clear()
-        ax.set_title("Footprint Preview", fontsize=11)
+        ax.set_facecolor(_C_BG)
         ax.text(0.5, 0.5, "Click 'Synthesize'\nto generate preview",
-                ha='center', va='center', fontsize=12, color='#999',
+                ha='center', va='center', fontsize=12, color='#666',
                 transform=ax.transAxes)
         ax.set_aspect('equal')
-        ax.axis('off')
+        for sp in ax.spines.values(): sp.set_visible(False)
+        ax.set_xticks([]); ax.set_yticks([])
         self._canvas.draw()
 
     def _draw_preview(self):
         if not HAS_MPL or self._profile is None:
             return
-        from addon.footprint_gen import FootprintSpec, footprint_dimensions
+        from addon.footprint_gen import footprint_dimensions, _taper_polygon_mm
 
         spec = self._current_spec()
         dims = footprint_dimensions(spec)
@@ -192,60 +202,51 @@ class TaperWizard(wx.Dialog):
 
         ax = self._ax_prev
         ax.clear()
-        ax.set_title("Footprint Preview", fontsize=11)
+        ax.set_facecolor(_C_BG)
 
         L_s = dims["L_landing_start_mm"]
         L_b = dims["L_body_mm"]
         L_e = dims["L_landing_end_mm"]
         w_s = dims["w_start_mm"]
         w_e = dims["w_end_mm"]
-
-        body_start = L_s / 2
-        body_end = body_start + L_b
-
-        # Draw pads
-        import matplotlib.patches as mpatches
-        pad1 = mpatches.Rectangle((-L_s/2, -w_s/2), L_s, w_s,
-                                   fc=_C_PAD, ec='black', lw=0.8, alpha=0.5)
-        pad2 = mpatches.Rectangle((body_end, -w_e/2), L_e, w_e,
-                                   fc=_C_PAD, ec='black', lw=0.8, alpha=0.5)
-        ax.add_patch(pad1)
-        ax.add_patch(pad2)
-
-        # Draw taper body
-        z = profile.z_samples * 1e3
-        w = profile.w_layout * 1e3
-        x_top = body_start + z
-        x_bot = body_start + z
-        y_top = w / 2
-        y_bot = -w / 2
-
-        poly_x = list(x_top) + list(reversed(x_bot))
-        poly_y = list(y_top) + list(reversed(y_bot))
-        ax.fill(poly_x, poly_y, fc=_C_TAPER, ec='black', lw=0.8, alpha=0.7)
-
-        # Annotations
-        ax.annotate("Pad 1", (0, w_s/2 + 0.15), ha='center', fontsize=8, color='#333')
-        ax.annotate("Pad 2", (body_end + L_e/2, w_e/2 + 0.15), ha='center', fontsize=8, color='#333')
-
-        # Dimension lines
         total = L_s + L_b + L_e
-        y_dim = -max(w_s, w_e)/2 - 0.5
-        ax.annotate("", xy=(body_start, y_dim), xytext=(body_end, y_dim),
-                     arrowprops=dict(arrowstyle="<->", color='blue', lw=1))
-        ax.text((body_start+body_end)/2, y_dim-0.2, f"L_body={L_b:.2f}mm",
-                ha='center', fontsize=7, color='blue')
-        ax.annotate("", xy=(-L_s/2, y_dim-0.8), xytext=(body_end+L_e, y_dim-0.8),
-                     arrowprops=dict(arrowstyle="<->", color='#666', lw=1))
-        ax.text(total/2 - L_s/2, y_dim-1.0, f"L_total={total:.2f}mm",
-                ha='center', fontsize=7, color='#666')
 
-        ax.set_xlim(-L_s/2 - 0.5, body_end + L_e + 0.5)
-        ax.set_ylim(y_dim - 1.5, max(w_s, w_e)/2 + 0.8)
+        # Use exact footprint polygon (same geometry as .kicad_mod)
+        poly_pts = _taper_polygon_mm(spec)
+        px = [p[0] for p in poly_pts]
+        py = [p[1] for p in poly_pts]
+        ax.fill(px, py, fc=_C_COPPER, ec='#ff5555', lw=0.6, alpha=0.85)
+
+        # Origin crosshair
+        ch = max(w_s, w_e) * 0.6
+        ax.plot([0, 0], [-ch, ch], color=_C_ORIGIN, lw=0.5, alpha=0.5)
+        ax.plot([-ch, ch], [0, 0], color=_C_ORIGIN, lw=0.5, alpha=0.5)
+
+        # Subtle pad labels
+        ax.text(0, w_s/2 + 0.12, "1", ha='center', fontsize=7, color='#aaa')
+        body_end = L_s/2 + L_b
+        ax.text(body_end + L_e/2, w_e/2 + 0.12, "1", ha='center', fontsize=7, color='#aaa')
+
+        # Dimension annotations (CAD style)
+        y_dim = -max(w_s, w_e)/2 - 0.4
+        body_start = L_s / 2
+        ax.annotate("", xy=(body_start, y_dim), xytext=(body_end, y_dim),
+                     arrowprops=dict(arrowstyle="<->", color=_C_DIM, lw=0.8))
+        ax.text((body_start+body_end)/2, y_dim-0.15, f"{L_b:.2f}",
+                ha='center', fontsize=6, color=_C_DIM)
+        ax.annotate("", xy=(-L_s/2, y_dim-0.6), xytext=(body_end+L_e, y_dim-0.6),
+                     arrowprops=dict(arrowstyle="<->", color='#5577aa', lw=0.8))
+        ax.text(total/2 - L_s/2, y_dim-0.75, f"{total:.2f} mm",
+                ha='center', fontsize=6, color='#5577aa')
+
+        # Grid (KiCad-like dots)
+        margin = max(total, max(w_s, w_e)) * 0.15
+        ax.set_xlim(-L_s/2 - margin, body_end + L_e + margin)
+        ax.set_ylim(y_dim - 1.2, max(w_s, w_e)/2 + 0.5)
         ax.set_aspect('equal')
-        ax.set_xlabel("x (mm)")
-        ax.set_ylabel("y (mm)")
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, color=_C_GRID, lw=0.3, alpha=0.5)
+        for sp in ax.spines.values(): sp.set_color(_C_GRID)
+        ax.tick_params(colors='#555', labelsize=6)
         self._canvas.draw()
 
     # ── Helpers ───────────────────────────────────────────────────────
@@ -286,6 +287,7 @@ class TaperWizard(wx.Dialog):
     # ── Button handlers ──────────────────────────────────────────────
 
     def _on_synthesize(self, event):
+        logger.info("Synthesize clicked")
         try:
             p = self._read_params()
             from addon.ui_main import synthesize_taper, SynthesisRequest
@@ -300,6 +302,7 @@ class TaperWizard(wx.Dialog):
 
             self._profile = profile
             self._result = result
+            logger.info("Synthesis OK: L=%.3f mm", profile.L * 1e3)
 
             from addon.footprint_gen import footprint_dimensions
             spec = self._current_spec()
@@ -338,14 +341,24 @@ class TaperWizard(wx.Dialog):
             self._btn_save.Enable()
 
         except Exception as e:
+            logger.error("Synthesis failed: %s\n%s", e, traceback.format_exc())
             wx.MessageBox(f"Synthesis failed:\n{e}", "Error",
                           wx.OK | wx.ICON_ERROR)
 
     def _on_sparams(self, event):
+        logger.info("S-Parameters clicked")
         if self._result is None:
+            wx.MessageBox("Please synthesize first.", "S-Parameters",
+                          wx.OK | wx.ICON_INFORMATION)
             return
-        dlg = SParamPlotDialog(self, self._result, self._read_params())
-        dlg.Show()
+        try:
+            dlg = SParamPlotDialog(self, self._result, self._read_params())
+            dlg.Show()
+            logger.info("S-Parameter plot window created")
+        except Exception as e:
+            logger.error("S-param plot failed: %s\n%s", e, traceback.format_exc())
+            wx.MessageBox(f"S-parameter plot failed:\n{e}", "Error",
+                          wx.OK | wx.ICON_ERROR)
 
     def _on_export(self, event):
         if self._result is None or self._profile is None:
@@ -370,22 +383,25 @@ class TaperWizard(wx.Dialog):
         fd.Destroy()
 
         try:
-            p = self._read_params()
-            settings = self._settings
+            logger.info("Export choice=%d path=%s", choice, path)
             if choice == 0:
-                from rfcore.export.touchstone import export_touchstone2
-                export_touchstone2(self._result, settings, path)
+                from rfcore.export.touchstone import export_touchstone_v2
+                export_touchstone_v2(self._result, path)
             elif choice == 1:
-                from rfcore.export.touchstone import export_touchstone1_compat
-                export_touchstone1_compat(self._result, settings, path)
+                from rfcore.export.touchstone import export_touchstone_v1
+                export_touchstone_v1(self._result, path)
             else:
-                from rfcore.export.csv_export import export_freq_csv
-                export_freq_csv(self._result, settings, path)
+                from rfcore.export.csv_export import export_frequency_csv
+                export_frequency_csv(self._result, path)
             wx.MessageBox(f"Saved: {path}", "Export Complete", wx.OK | wx.ICON_INFORMATION)
+            logger.info("Export saved: %s", path)
         except Exception as e:
-            wx.MessageBox(f"Export failed:\n{e}", "Error", wx.OK | wx.ICON_ERROR)
+            logger.error("Export failed: %s\n%s", e, traceback.format_exc())
+            wx.MessageBox(f"Export failed:\n{e}\n\n{traceback.format_exc()}",
+                          "Error", wx.OK | wx.ICON_ERROR)
 
     def _on_em(self, event):
+        logger.info("EM Simulation clicked (stub)")
         wx.MessageBox(
             "EM simulation backend is not implemented yet.\n\n"
             "Future versions will integrate with openEMS for\n"
@@ -394,12 +410,16 @@ class TaperWizard(wx.Dialog):
             "EM Simulation", wx.OK | wx.ICON_INFORMATION)
 
     def _on_stackup(self, event):
+        logger.info("Stackup Settings clicked")
         dlg = StackupDialog(self, self._settings)
         dlg.ShowModal()
         dlg.Destroy()
 
     def _on_save(self, event):
+        logger.info("Save Footprint clicked")
         if self._profile is None:
+            wx.MessageBox("Please synthesize first.", "Save",
+                          wx.OK | wx.ICON_INFORMATION)
             return
         from addon.footprint_gen import (
             generate_footprint, save_footprint, default_library_path,
@@ -424,11 +444,13 @@ class TaperWizard(wx.Dialog):
 
         try:
             fp_path = save_footprint(content, spec.fp_name, chosen)
+            logger.info("Footprint saved: %s", fp_path)
             instructions = library_registration_instructions(chosen)
             wx.MessageBox(
                 f"Footprint saved:\n{fp_path}\n\n{instructions}",
                 "Save Complete", wx.OK | wx.ICON_INFORMATION)
         except Exception as e:
+            logger.error("Save failed: %s\n%s", e, traceback.format_exc())
             wx.MessageBox(f"Save failed:\n{e}", "Error", wx.OK | wx.ICON_ERROR)
 
 
@@ -455,7 +477,7 @@ class SParamPlotDialog(wx.Frame):
         panel.SetSizer(sizer)
 
         ax = fig.add_subplot(111)
-        f = result.f_hz / 1e9
+        f = result.freqs / 1e9
 
         ax.plot(f, result.s11_db, color=_C_S11, lw=1.5, label="|S₁₁|")
         ax.plot(f, result.s21_db, color=_C_S21, lw=1.5, label="|S₂₁|")

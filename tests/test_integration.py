@@ -611,3 +611,41 @@ class TestFootprintGeneration:
         content = generate_footprint(self._make_spec())
         assert content.count("(xy ") > 10
 
+
+class TestExports:
+    """Test CSV and Touchstone exports use correct function names."""
+
+    def _make_result(self):
+        from addon.ui_main import synthesize_taper, SynthesisRequest
+        request = SynthesisRequest(ZS_ohm=50, ZL_ohm=75, Gamma_m=0.05)
+        result, _, _ = synthesize_taper(request, RFProjectSettings())
+        return result
+
+    def test_csv_export_writes_file(self):
+        from rfcore.export.csv_export import export_frequency_csv
+        result = self._make_result()
+        with tempfile.TemporaryDirectory() as td:
+            p = pathlib.Path(td) / "test.csv"
+            export_frequency_csv(result, p)
+            assert p.exists()
+            text = p.read_text()
+            assert "f_hz" in text
+            assert "s11_db" in text
+
+    def test_touchstone_v2_writes_file(self):
+        from rfcore.export.touchstone import export_touchstone_v2
+        result = self._make_result()
+        with tempfile.TemporaryDirectory() as td:
+            p = pathlib.Path(td) / "test.ts"
+            export_touchstone_v2(result, p)
+            assert p.exists()
+            text = p.read_text()
+            assert "[Reference]" in text
+
+    def test_touchstone_v1_writes_file(self):
+        from rfcore.export.touchstone import export_touchstone_v1
+        result = self._make_result()
+        with tempfile.TemporaryDirectory() as td:
+            p = pathlib.Path(td) / "test.s2p"
+            export_touchstone_v1(result, p)
+            assert p.exists()

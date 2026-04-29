@@ -1,531 +1,531 @@
-"""KiCad-style wxPython dialog for Klopfenstein taper tool.
+"""KiCad-native Klopfenstein taper footprint generator wizard.
 
-Provides:
-  - RF parameter input panel
-  - Interactive S-parameter plot (embedded matplotlib with zoom/pan)
-  - Geometry preview
-  - Headline metrics and warnings
-  - Insert / Export / Cancel buttons
+wxPython dialog with:
+  - Parameter panel (left): stackup, electrical, geometry, results
+  - Live footprint preview (right)
+  - Toolbar: Synthesize, S-Params, Export, EM stub, Stackup, Save, Close
 
-Designed to run inside KiCad's Python environment.
-Can also be tested standalone with mock data.
-
-All KiCad interaction goes through ``addon.kicad_compat`` — this module
-does NOT import ``pcbnew`` directly.
+All RF math goes through rfcore (unchanged). This module is UI only.
 """
 
 from __future__ import annotations
-
 import pathlib
-from typing import Optional, List, Tuple
+from typing import Optional
 
 try:
     import wx
-    import wx.lib.scrolledpanel as scrolled
     HAS_WX = True
 except ImportError:
     HAS_WX = False
 
-import numpy as np
-
-# Matplotlib with WXAgg backend for embedding
 try:
     import matplotlib
     matplotlib.use("WXAgg")
     from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg as FigureCanvas
-    from matplotlib.backends.backend_wxagg import NavigationToolbar2WxAgg as NavigationToolbar
     from matplotlib.figure import Figure
     HAS_MPL = True
 except ImportError:
     HAS_MPL = False
 
+import numpy as np
 from rfcore.config import RFProjectSettings
-from rfcore.taper_assembly import AssemblyResult
 from rfcore.klopfenstein import KlopfensteinProfile
-from addon.selection import SelectionResult
+from rfcore.taper_assembly import AssemblyResult
 
-
-# ── Colors ───────────────────────────────────────────────────────────────
 _C_S11 = "#1f77b4"
 _C_S21 = "#2ca02c"
 _C_S22 = "#d62728"
 _C_TARGET = "#888888"
+_C_TAPER = "#cc7722"
+_C_PAD = "#33aa33"
 
 
-class TaperDialog(wx.Dialog):
-    """Main taper synthesis dialog.
+class TaperWizard(wx.Dialog):
+    """Klopfenstein taper footprint generator wizard."""
 
-    Parameters
-    ----------
-    parent : wx.Window or None
-    board : pcbnew.BOARD or None (for standalone testing)
-    selection : SelectionResult
-    settings : RFProjectSettings or None
-    """
-
-    def __init__(
-        self,
-        parent,
-        board=None,
-        selection: Optional[SelectionResult] = None,
-        settings: Optional[RFProjectSettings] = None,
-        kicad_ver: Optional[Tuple[int, int, int]] = None,
-    ):
-        if not HAS_WX:
-            raise RuntimeError("wxPython is required for the dialog.")
-
-        super().__init__(
-            parent,
-            title="RF Klopfenstein Taper Tool",
-            size=(1000, 700),
-            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
-        )
-
-        self._board = board
-        self._selection = selection or SelectionResult()
-        self._settings = settings or RFProjectSettings()
-        self._result: Optional[AssemblyResult] = None
+    def __init__(self, parent, kicad_ver=(8, 0, 0)):
+        super().__init__(parent, title="RF Klopfenstein Taper Generator",
+                         size=(1050, 700),
+                         style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        self._ver = kicad_ver
         self._profile: Optional[KlopfensteinProfile] = None
-        self._kicad_ver = kicad_ver or (0, 0, 0)
-
+        self._result: Optional[AssemblyResult] = None
+        self._settings = RFProjectSettings()
+        self._last_lib_path: Optional[pathlib.Path] = None
         self._build_ui()
-        self._populate_from_selection()
+        self.CenterOnParent()
 
-        self.Centre()
-
-    # ─── UI construction ─────────────────────────────────────────────
+    # ── UI construction ──────────────────────────────────────────────
 
     def _build_ui(self):
-        main_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        main = wx.BoxSizer(wx.VERTICAL)
 
-        # Left panel: parameters + metrics
-        left_panel = self._build_left_panel()
-        main_sizer.Add(left_panel, 0, wx.EXPAND | wx.ALL, 5)
+        # Toolbar
+        tb = wx.BoxSizer(wx.HORIZONTAL)
+        self._btn_synth = wx.Button(self, label="Synthesize")
+        self._btn_sparam = wx.Button(self, label="S-Parameters")
+        self._btn_export = wx.Button(self, label="Export S-Params")
+        self._btn_em = wx.Button(self, label="EM Simulation")
+        self._btn_stackup = wx.Button(self, label="Stackup Settings")
+        self._btn_save = wx.Button(self, label="Save Footprint")
+        self._btn_close = wx.Button(self, id=wx.ID_CLOSE, label="Close")
 
-        # Right panel: plots
-        right_panel = self._build_right_panel()
-        main_sizer.Add(right_panel, 1, wx.EXPAND | wx.ALL, 5)
+        for b in [self._btn_synth, self._btn_sparam, self._btn_export,
+                   self._btn_em, self._btn_stackup, self._btn_save, self._btn_close]:
+            tb.Add(b, 0, wx.ALL, 3)
 
-        # Bottom buttons
-        outer_sizer = wx.BoxSizer(wx.VERTICAL)
-        outer_sizer.Add(main_sizer, 1, wx.EXPAND)
-        outer_sizer.Add(self._build_buttons(), 0, wx.EXPAND | wx.ALL, 5)
+        self._btn_synth.Bind(wx.EVT_BUTTON, self._on_synthesize)
+        self._btn_sparam.Bind(wx.EVT_BUTTON, self._on_sparams)
+        self._btn_export.Bind(wx.EVT_BUTTON, self._on_export)
+        self._btn_em.Bind(wx.EVT_BUTTON, self._on_em)
+        self._btn_stackup.Bind(wx.EVT_BUTTON, self._on_stackup)
+        self._btn_save.Bind(wx.EVT_BUTTON, self._on_save)
+        self._btn_close.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CLOSE))
 
-        self.SetSizer(outer_sizer)
+        self._btn_sparam.Disable()
+        self._btn_export.Disable()
+        self._btn_save.Disable()
 
-    def _build_left_panel(self) -> wx.Panel:
-        panel = wx.Panel(self)
+        main.Add(tb, 0, wx.EXPAND | wx.ALL, 4)
+
+        # Main split: params (left) | preview (right)
+        splitter = wx.SplitterWindow(self, style=wx.SP_LIVE_UPDATE)
+        left = self._build_params(splitter)
+        right = self._build_preview(splitter)
+        splitter.SplitVertically(left, right, 360)
+        splitter.SetMinimumPaneSize(280)
+        main.Add(splitter, 1, wx.EXPAND | wx.ALL, 4)
+
+        self.SetSizer(main)
+
+    def _build_params(self, parent):
+        panel = wx.ScrolledWindow(parent)
+        panel.SetScrollRate(0, 10)
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        # ── RF Parameters ──
-        param_box = wx.StaticBox(panel, label="RF Parameters")
-        param_sizer = wx.StaticBoxSizer(param_box, wx.VERTICAL)
-        grid = wx.FlexGridSizer(cols=2, vgap=4, hgap=8)
-        grid.AddGrowableCol(1)
+        # ── Electrical target ──
+        box_e = wx.StaticBoxSizer(wx.VERTICAL, panel, "Electrical Target")
+        grid_e = wx.FlexGridSizer(cols=2, hgap=8, vgap=4)
+        grid_e.AddGrowableCol(1)
 
-        self._zs = self._add_param(grid, panel, "ZS (Ω):", "50.0")
-        self._zl = self._add_param(grid, panel, "ZL (Ω):", "75.0")
-        self._gm = self._add_param(grid, panel, "Γm:", "0.05")
-        self._fstart = self._add_param(grid, panel, "f_start (GHz):", "1.0")
-        self._fstop = self._add_param(grid, panel, "f_stop (GHz):", "10.0")
-        self._margin = self._add_param(grid, panel, "Length margin:", "1.0")
+        self._zs = self._add_field(grid_e, panel, "ZS (Ω):", "50.0")
+        self._zl = self._add_field(grid_e, panel, "ZL (Ω):", "75.0")
+        self._gm = self._add_field(grid_e, panel, "Γm:", "0.05")
+        self._fstart = self._add_field(grid_e, panel, "f_start (GHz):", "1.0")
+        self._fstop = self._add_field(grid_e, panel, "f_stop (GHz):", "10.0")
+        self._lm = self._add_field(grid_e, panel, "length_margin:", "1.0")
 
-        param_sizer.Add(grid, 0, wx.EXPAND | wx.ALL, 5)
-        sizer.Add(param_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
+        box_e.Add(grid_e, 0, wx.EXPAND | wx.ALL, 4)
+        sizer.Add(box_e, 0, wx.EXPAND | wx.BOTTOM, 6)
 
-        # ── Layout ──
-        layout_box = wx.StaticBox(panel, label="Layout")
-        layout_sizer = wx.StaticBoxSizer(layout_box, wx.VERTICAL)
-        lgrid = wx.FlexGridSizer(cols=2, vgap=4, hgap=8)
-        lgrid.AddGrowableCol(1)
+        # ── Geometry ──
+        box_g = wx.StaticBoxSizer(wx.VERTICAL, panel, "Geometry")
+        grid_g = wx.FlexGridSizer(cols=2, hgap=8, vgap=4)
+        grid_g.AddGrowableCol(1)
 
-        self._layer = self._add_param(lgrid, panel, "Layer:", "F.Cu")
-        self._net = self._add_param(lgrid, panel, "Net:", "")
+        self._land_s = self._add_field(grid_g, panel, "Input landing (mm):", "0.5")
+        self._land_e = self._add_field(grid_g, panel, "Output landing (mm):", "0.5")
+        self._fp_name = self._add_field(grid_g, panel, "Footprint name:", "")
 
-        layout_sizer.Add(lgrid, 0, wx.EXPAND | wx.ALL, 5)
-        sizer.Add(layout_sizer, 0, wx.EXPAND | wx.BOTTOM, 5)
+        box_g.Add(grid_g, 0, wx.EXPAND | wx.ALL, 4)
+        sizer.Add(box_g, 0, wx.EXPAND | wx.BOTTOM, 6)
 
-        # ── Compute button ──
-        self._btn_compute = wx.Button(panel, label="Compute")
-        self._btn_compute.Bind(wx.EVT_BUTTON, self._on_compute)
-        sizer.Add(self._btn_compute, 0, wx.EXPAND | wx.BOTTOM, 10)
-
-        # ── Metrics ──
-        metrics_box = wx.StaticBox(panel, label="Metrics")
-        metrics_sizer = wx.StaticBoxSizer(metrics_box, wx.VERTICAL)
-        self._metrics_text = wx.StaticText(panel, label="(click Compute)")
-        self._metrics_text.SetFont(
-            wx.Font(9, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
-        )
-        metrics_sizer.Add(self._metrics_text, 1, wx.EXPAND | wx.ALL, 5)
-        sizer.Add(metrics_sizer, 1, wx.EXPAND)
-
-        # ── S-param toggles ──
-        toggle_box = wx.StaticBox(panel, label="Plot Traces")
-        toggle_sizer = wx.StaticBoxSizer(toggle_box, wx.HORIZONTAL)
-        self._chk_s11 = wx.CheckBox(panel, label="S11")
-        self._chk_s21 = wx.CheckBox(panel, label="S21")
-        self._chk_s22 = wx.CheckBox(panel, label="S22")
-        self._chk_s11.SetValue(True)
-        self._chk_s21.SetValue(True)
-        self._chk_s22.SetValue(True)
-        for chk in (self._chk_s11, self._chk_s21, self._chk_s22):
-            chk.Bind(wx.EVT_CHECKBOX, self._on_toggle_trace)
-            toggle_sizer.Add(chk, 0, wx.ALL, 5)
-        sizer.Add(toggle_sizer, 0, wx.EXPAND | wx.TOP, 5)
+        # ── Results ──
+        box_r = wx.StaticBoxSizer(wx.VERTICAL, panel, "Computed Results")
+        self._results_text = wx.TextCtrl(
+            panel, style=wx.TE_MULTILINE | wx.TE_READONLY,
+            size=(-1, 220))
+        self._results_text.SetFont(wx.Font(10, wx.FONTFAMILY_TELETYPE,
+                                           wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+        self._results_text.SetValue("Click 'Synthesize' to compute.")
+        box_r.Add(self._results_text, 1, wx.EXPAND | wx.ALL, 4)
+        sizer.Add(box_r, 1, wx.EXPAND)
 
         panel.SetSizer(sizer)
-        panel.SetMinSize((240, -1))
         return panel
 
-    def _build_right_panel(self) -> wx.Panel:
-        panel = wx.Panel(self)
+    def _build_preview(self, parent):
+        panel = wx.Panel(parent)
         sizer = wx.BoxSizer(wx.VERTICAL)
 
         if HAS_MPL:
-            # S-parameter plot
-            self._fig = Figure(figsize=(7, 4), dpi=100)
-            self._ax = self._fig.add_subplot(111)
-            self._ax.set_xlabel("Frequency (GHz)")
-            self._ax.set_ylabel("Magnitude (dB)")
-            self._ax.set_title("S-Parameters")
-            self._ax.grid(True, alpha=0.3)
-
+            self._fig = Figure(figsize=(5, 4), dpi=100)
+            self._fig.patch.set_facecolor("#f0f0f0")
+            self._ax_prev = self._fig.add_subplot(111)
             self._canvas = FigureCanvas(panel, -1, self._fig)
-            self._toolbar = NavigationToolbar(self._canvas)
-            self._toolbar.Realize()
-
             sizer.Add(self._canvas, 1, wx.EXPAND)
-            sizer.Add(self._toolbar, 0, wx.EXPAND)
+            self._draw_empty_preview()
         else:
-            sizer.Add(
-                wx.StaticText(panel, label="matplotlib not available — no plot"),
-                1, wx.EXPAND | wx.ALL, 20,
-            )
+            lbl = wx.StaticText(panel, label="matplotlib not available.\nPreview disabled.")
+            sizer.Add(lbl, 1, wx.EXPAND | wx.ALL, 20)
 
         panel.SetSizer(sizer)
         return panel
 
-    def _build_buttons(self) -> wx.BoxSizer:
-        sizer = wx.BoxSizer(wx.HORIZONTAL)
-
-        self._btn_insert = wx.Button(self, label="Insert")
-        self._btn_insert.Bind(wx.EVT_BUTTON, self._on_insert)
-        self._btn_insert.Enable(False)
-
-        self._btn_export = wx.Button(self, label="Export Reports...")
-        self._btn_export.Bind(wx.EVT_BUTTON, self._on_export)
-        self._btn_export.Enable(False)
-
-        btn_cancel = wx.Button(self, wx.ID_CANCEL, label="Cancel")
-
-        sizer.Add(self._btn_insert, 0, wx.ALL, 5)
-        sizer.Add(self._btn_export, 0, wx.ALL, 5)
-        sizer.AddStretchSpacer()
-        sizer.Add(btn_cancel, 0, wx.ALL, 5)
-
-        return sizer
-
-    def _add_param(self, grid, parent, label, default) -> wx.TextCtrl:
-        grid.Add(wx.StaticText(parent, label=label), 0,
-                 wx.ALIGN_CENTER_VERTICAL)
-        ctrl = wx.TextCtrl(parent, value=default, size=(100, -1))
-        grid.Add(ctrl, 0, wx.EXPAND)
+    def _add_field(self, grid, panel, label, default):
+        grid.Add(wx.StaticText(panel, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+        ctrl = wx.TextCtrl(panel, value=default, size=(120, -1))
+        grid.Add(ctrl, 1, wx.EXPAND)
         return ctrl
 
-    # ─── Selection population ────────────────────────────────────────
+    # ── Preview drawing ──────────────────────────────────────────────
 
-    def _populate_from_selection(self):
-        sel = self._selection
-        if sel.layer:
-            self._layer.SetValue(sel.layer)
-        if sel.net_name:
-            self._net.SetValue(sel.net_name)
-        if sel.mode == "auto" and sel.valid:
-            # Pre-compute impedance from widths if we have them
-            pass  # ZS/ZL come from RF design intent, not trace widths
+    def _draw_empty_preview(self):
+        ax = self._ax_prev
+        ax.clear()
+        ax.set_title("Footprint Preview", fontsize=11)
+        ax.text(0.5, 0.5, "Click 'Synthesize'\nto generate preview",
+                ha='center', va='center', fontsize=12, color='#999',
+                transform=ax.transAxes)
+        ax.set_aspect('equal')
+        ax.axis('off')
+        self._canvas.draw()
 
-    # ─── Event handlers ──────────────────────────────────────────────
+    def _draw_preview(self):
+        if not HAS_MPL or self._profile is None:
+            return
+        from addon.footprint_gen import FootprintSpec, footprint_dimensions
 
-    def _on_compute(self, event):
-        """Run taper synthesis with current parameters."""
+        spec = self._current_spec()
+        dims = footprint_dimensions(spec)
+        profile = self._profile
+
+        ax = self._ax_prev
+        ax.clear()
+        ax.set_title("Footprint Preview", fontsize=11)
+
+        L_s = dims["L_landing_start_mm"]
+        L_b = dims["L_body_mm"]
+        L_e = dims["L_landing_end_mm"]
+        w_s = dims["w_start_mm"]
+        w_e = dims["w_end_mm"]
+
+        body_start = L_s / 2
+        body_end = body_start + L_b
+
+        # Draw pads
+        import matplotlib.patches as mpatches
+        pad1 = mpatches.Rectangle((-L_s/2, -w_s/2), L_s, w_s,
+                                   fc=_C_PAD, ec='black', lw=0.8, alpha=0.5)
+        pad2 = mpatches.Rectangle((body_end, -w_e/2), L_e, w_e,
+                                   fc=_C_PAD, ec='black', lw=0.8, alpha=0.5)
+        ax.add_patch(pad1)
+        ax.add_patch(pad2)
+
+        # Draw taper body
+        z = profile.z_samples * 1e3
+        w = profile.w_layout * 1e3
+        x_top = body_start + z
+        x_bot = body_start + z
+        y_top = w / 2
+        y_bot = -w / 2
+
+        poly_x = list(x_top) + list(reversed(x_bot))
+        poly_y = list(y_top) + list(reversed(y_bot))
+        ax.fill(poly_x, poly_y, fc=_C_TAPER, ec='black', lw=0.8, alpha=0.7)
+
+        # Annotations
+        ax.annotate("Pad 1", (0, w_s/2 + 0.15), ha='center', fontsize=8, color='#333')
+        ax.annotate("Pad 2", (body_end + L_e/2, w_e/2 + 0.15), ha='center', fontsize=8, color='#333')
+
+        # Dimension lines
+        total = L_s + L_b + L_e
+        y_dim = -max(w_s, w_e)/2 - 0.5
+        ax.annotate("", xy=(body_start, y_dim), xytext=(body_end, y_dim),
+                     arrowprops=dict(arrowstyle="<->", color='blue', lw=1))
+        ax.text((body_start+body_end)/2, y_dim-0.2, f"L_body={L_b:.2f}mm",
+                ha='center', fontsize=7, color='blue')
+        ax.annotate("", xy=(-L_s/2, y_dim-0.8), xytext=(body_end+L_e, y_dim-0.8),
+                     arrowprops=dict(arrowstyle="<->", color='#666', lw=1))
+        ax.text(total/2 - L_s/2, y_dim-1.0, f"L_total={total:.2f}mm",
+                ha='center', fontsize=7, color='#666')
+
+        ax.set_xlim(-L_s/2 - 0.5, body_end + L_e + 0.5)
+        ax.set_ylim(y_dim - 1.5, max(w_s, w_e)/2 + 0.8)
+        ax.set_aspect('equal')
+        ax.set_xlabel("x (mm)")
+        ax.set_ylabel("y (mm)")
+        ax.grid(True, alpha=0.3)
+        self._canvas.draw()
+
+    # ── Helpers ───────────────────────────────────────────────────────
+
+    def _current_spec(self):
+        from addon.footprint_gen import FootprintSpec, auto_footprint_name
+        profile = self._profile
+
+        ZS = float(self._zs.GetValue())
+        ZL = float(self._zl.GetValue())
+        Gamma_m = float(self._gm.GetValue())
+        f_start = float(self._fstart.GetValue()) * 1e9
+        f_stop = float(self._fstop.GetValue()) * 1e9
+
+        name = self._fp_name.GetValue().strip()
+        if not name:
+            name = auto_footprint_name(ZS, ZL, Gamma_m, f_start)
+
+        return FootprintSpec(
+            profile=profile,
+            fp_name=name,
+            landing_start_m=float(self._land_s.GetValue()) * 1e-3,
+            landing_end_m=float(self._land_e.GetValue()) * 1e-3,
+            ZS=ZS, ZL=ZL, Gamma_m=Gamma_m,
+            f_start_hz=f_start, f_stop_hz=f_stop,
+        )
+
+    def _read_params(self):
+        return {
+            "ZS": float(self._zs.GetValue()),
+            "ZL": float(self._zl.GetValue()),
+            "Gamma_m": float(self._gm.GetValue()),
+            "f_start": float(self._fstart.GetValue()) * 1e9,
+            "f_stop": float(self._fstop.GetValue()) * 1e9,
+            "length_margin": float(self._lm.GetValue()),
+        }
+
+    # ── Button handlers ──────────────────────────────────────────────
+
+    def _on_synthesize(self, event):
         try:
-            from rfcore.microstrip import MicrostripModel
+            p = self._read_params()
+            from addon.ui_main import synthesize_taper, SynthesisRequest
 
-            ZS = float(self._zs.GetValue())
-            ZL = float(self._zl.GetValue())
-            Gamma_m = float(self._gm.GetValue())
-            f_start = float(self._fstart.GetValue()) * 1e9
-            f_stop = float(self._fstop.GetValue()) * 1e9
-            margin = float(self._margin.GetValue())
+            self._settings.analysis.f_start_hz = p["f_start"]
+            self._settings.analysis.f_stop_hz = p["f_stop"]
+            self._settings.analysis.length_margin = p["length_margin"]
 
-            self._settings.analysis.f_start_hz = f_start
-            self._settings.analysis.f_stop_hz = f_stop
-            self._settings.analysis.length_margin = margin
+            request = SynthesisRequest(
+                ZS_ohm=p["ZS"], ZL_ohm=p["ZL"], Gamma_m=p["Gamma_m"])
+            result, report, profile = synthesize_taper(request, self._settings)
 
-            ms = MicrostripModel.from_settings(self._settings)
+            self._profile = profile
+            self._result = result
 
-            self._profile = KlopfensteinProfile(
-                ZS=ZS, ZL=ZL, Gamma_m=Gamma_m,
-                microstrip=ms,
-                f_min=f_start,
-                f_geom=self._settings.analysis.f_geom,
-                length_margin=margin,
-            )
+            from addon.footprint_gen import footprint_dimensions
+            spec = self._current_spec()
+            dims = footprint_dimensions(spec)
 
-            from rfcore.taper_assembly import TaperAssembly
-            assembly = TaperAssembly(self._settings, self._profile, ms)
-            self._result = assembly.evaluate()
+            lines = [
+                f"ZS = {p['ZS']:.1f} Ω   (z01 = {result.z01:.1f} Ω)",
+                f"ZL = {p['ZL']:.1f} Ω   (z02 = {result.z02:.1f} Ω)",
+                f"Γm = {p['Gamma_m']:.4f}",
+                f"f_start = {p['f_start']/1e9:.2f} GHz",
+                f"f_stop = {p['f_stop']/1e9:.2f} GHz",
+                "",
+                f"L_min   = {profile.L_min*1e3:.3f} mm",
+                f"L_body  = {dims['L_body_mm']:.3f} mm  (RF taper)",
+                f"L_total = {dims['L_total_mm']:.3f} mm  (with landings)",
+                "",
+                f"w_start = {dims['w_start_mm']:.4f} mm",
+                f"w_end   = {dims['w_end_mm']:.4f} mm",
+                "",
+                f"Max |S11| = {result.max_s11_db:.1f} dB",
+                f"Max |S22| = {result.max_s22_db:.1f} dB",
+                f"Worst IL  = {result.max_insertion_loss_db:.2f} dB",
+                "",
+                f"Source: Fast analytical model",
+            ]
+            self._results_text.SetValue("\n".join(lines))
+            self._draw_preview()
 
-            self._update_metrics()
-            self._update_plot()
-            self._btn_insert.Enable(True)
-            self._btn_export.Enable(True)
+            if not self._fp_name.GetValue().strip():
+                from addon.footprint_gen import auto_footprint_name
+                self._fp_name.SetValue(
+                    auto_footprint_name(p["ZS"], p["ZL"], p["Gamma_m"], p["f_start"]))
+
+            self._btn_sparam.Enable()
+            self._btn_export.Enable()
+            self._btn_save.Enable()
 
         except Exception as e:
-            wx.MessageBox(str(e), "Compute Error", wx.ICON_ERROR)
+            wx.MessageBox(f"Synthesis failed:\n{e}", "Error",
+                          wx.OK | wx.ICON_ERROR)
 
-    def _on_toggle_trace(self, event):
-        if self._result is not None:
-            self._update_plot()
-
-    def _on_insert(self, event):
-        """Insert taper into the active board."""
-        if self._board is None:
-            wx.MessageBox(
-                "No board connection. Cannot insert.",
-                "Insert Error", wx.ICON_ERROR,
-            )
+    def _on_sparams(self, event):
+        if self._result is None:
             return
-
-        if self._profile is None or self._result is None:
-            return
-
-        try:
-            from addon.live_insert import prepare_insertion
-            from addon.board_insert import insert_taper_zone
-
-            plan = prepare_insertion(self._profile, self._selection)
-
-            # Print debug info to scripting console
-            print(plan.debug_summary())
-
-            # Show warnings before inserting
-            if plan.warnings:
-                warn_text = "\n".join(f"• {w}" for w in plan.warnings)
-                result = wx.MessageBox(
-                    f"Warnings:\n{warn_text}\n\nProceed with insertion?",
-                    "Insertion Warnings",
-                    wx.YES_NO | wx.ICON_WARNING,
-                )
-                if result != wx.YES:
-                    return
-
-            zone = insert_taper_zone(
-                self._board, plan.polygon,
-                layer=plan.layer,
-                net_name=plan.net_name,
-            )
-
-            # Save sidecar metadata
-            self._save_sidecar()
-
-            msg = (
-                f"Taper inserted successfully.\n"
-                f"Length: {plan.L_actual_m*1e3:.2f} mm\n"
-                f"Max |S11|: {self._result.max_s11_db:.1f} dB\n"
-            )
-            if plan.connects_end:
-                msg += "Both endpoints connected."
-            else:
-                msg += (
-                    f"Anchored at start only.\n"
-                    f"Gap: {plan.L_gap_m*1e3:.1f} mm, "
-                    f"Taper: {plan.L_actual_m*1e3:.1f} mm"
-                )
-
-            wx.MessageBox(msg, "Success", wx.ICON_INFORMATION)
-            self.EndModal(wx.ID_OK)
-
-        except Exception as e:
-            wx.MessageBox(str(e), "Insert Error", wx.ICON_ERROR)
+        dlg = SParamPlotDialog(self, self._result, self._read_params())
+        dlg.Show()
 
     def _on_export(self, event):
-        """Export all reports to a directory."""
-        dlg = wx.DirDialog(self, "Choose export directory")
-        if dlg.ShowModal() == wx.ID_OK:
-            export_dir = dlg.GetPath()
-            try:
-                self._export_all(pathlib.Path(export_dir))
-                wx.MessageBox(
-                    f"Reports exported to:\n{export_dir}",
-                    "Export Complete", wx.ICON_INFORMATION,
-                )
-            except Exception as e:
-                wx.MessageBox(str(e), "Export Error", wx.ICON_ERROR)
+        if self._result is None or self._profile is None:
+            return
+        choices = ["Touchstone 2.0 (.ts)", "Touchstone 1.0 (.s2p)", "CSV (.csv)"]
+        dlg = wx.SingleChoiceDialog(self, "Export format:", "Export S-Parameters", choices)
+        if dlg.ShowModal() != wx.ID_OK:
+            dlg.Destroy()
+            return
+        choice = dlg.GetSelection()
         dlg.Destroy()
 
-    # ─── Plot update ─────────────────────────────────────────────────
+        wildcard = ["Touchstone 2.0 (*.ts)|*.ts",
+                     "Touchstone 1.0 (*.s2p)|*.s2p",
+                     "CSV (*.csv)|*.csv"][choice]
+        fd = wx.FileDialog(self, "Save S-Parameters", wildcard=wildcard,
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT)
+        if fd.ShowModal() != wx.ID_OK:
+            fd.Destroy()
+            return
+        path = fd.GetPath()
+        fd.Destroy()
 
-    def _update_plot(self):
-        if not HAS_MPL or self._result is None:
+        try:
+            p = self._read_params()
+            settings = self._settings
+            if choice == 0:
+                from rfcore.export.touchstone import export_touchstone2
+                export_touchstone2(self._result, settings, path)
+            elif choice == 1:
+                from rfcore.export.touchstone import export_touchstone1_compat
+                export_touchstone1_compat(self._result, settings, path)
+            else:
+                from rfcore.export.csv_export import export_freq_csv
+                export_freq_csv(self._result, settings, path)
+            wx.MessageBox(f"Saved: {path}", "Export Complete", wx.OK | wx.ICON_INFORMATION)
+        except Exception as e:
+            wx.MessageBox(f"Export failed:\n{e}", "Error", wx.OK | wx.ICON_ERROR)
+
+    def _on_em(self, event):
+        wx.MessageBox(
+            "EM simulation backend is not implemented yet.\n\n"
+            "Future versions will integrate with openEMS for\n"
+            "full-wave verification of the taper design.\n\n"
+            "Current results use the fast analytical model.",
+            "EM Simulation", wx.OK | wx.ICON_INFORMATION)
+
+    def _on_stackup(self, event):
+        dlg = StackupDialog(self, self._settings)
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    def _on_save(self, event):
+        if self._profile is None:
+            return
+        from addon.footprint_gen import (
+            generate_footprint, save_footprint, default_library_path,
+            library_registration_instructions)
+
+        spec = self._current_spec()
+        content = generate_footprint(spec)
+
+        lib_path = self._last_lib_path or default_library_path()
+        dd = wx.DirDialog(self, "Choose footprint library (.pretty) directory",
+                          str(lib_path.parent),
+                          style=wx.DD_DEFAULT_STYLE)
+        if dd.ShowModal() != wx.ID_OK:
+            dd.Destroy()
+            return
+        chosen = pathlib.Path(dd.GetPath())
+        dd.Destroy()
+
+        if not chosen.name.endswith(".pretty"):
+            chosen = chosen / "Klopfenstein_Tapers.pretty"
+        self._last_lib_path = chosen
+
+        try:
+            fp_path = save_footprint(content, spec.fp_name, chosen)
+            instructions = library_registration_instructions(chosen)
+            wx.MessageBox(
+                f"Footprint saved:\n{fp_path}\n\n{instructions}",
+                "Save Complete", wx.OK | wx.ICON_INFORMATION)
+        except Exception as e:
+            wx.MessageBox(f"Save failed:\n{e}", "Error", wx.OK | wx.ICON_ERROR)
+
+
+# ── S-Parameter Plot Dialog ──────────────────────────────────────────
+
+class SParamPlotDialog(wx.Frame):
+    """Separate interactive S-parameter plot window."""
+
+    def __init__(self, parent, result: AssemblyResult, params: dict):
+        super().__init__(parent, title="S-Parameters", size=(700, 500))
+        self._result = result
+        self._params = params
+
+        if not HAS_MPL:
+            wx.MessageBox("matplotlib not available", "Error", wx.OK | wx.ICON_ERROR)
+            self.Destroy()
             return
 
-        ax = self._ax
-        ax.clear()
+        panel = wx.Panel(self)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        fig = Figure(figsize=(7, 5), dpi=100)
+        canvas = FigureCanvas(panel, -1, fig)
+        sizer.Add(canvas, 1, wx.EXPAND)
+        panel.SetSizer(sizer)
 
-        freqs_ghz = self._result.freqs / 1e9
-        z01 = self._result.z01
-        z02 = self._result.z02
+        ax = fig.add_subplot(111)
+        f = result.f_hz / 1e9
 
-        if self._chk_s11.GetValue():
-            ax.plot(freqs_ghz, self._result.s11_db, color=_C_S11,
-                    linewidth=1.5, label=f"|S11| (z01={z01:.0f}Ω)")
-            # Worst S11 marker
-            idx = int(np.argmax(self._result.s11_db))
-            ax.plot(freqs_ghz[idx], self._result.s11_db[idx], "v",
-                    color=_C_S11, markersize=8)
+        ax.plot(f, result.s11_db, color=_C_S11, lw=1.5, label="|S₁₁|")
+        ax.plot(f, result.s21_db, color=_C_S21, lw=1.5, label="|S₂₁|")
+        ax.plot(f, result.s22_db, color=_C_S22, lw=1.5, label="|S₂₂|")
 
-        if self._chk_s21.GetValue():
-            ax.plot(freqs_ghz, self._result.s21_db, color=_C_S21,
-                    linewidth=1.5, label="|S21|")
-            # Worst IL marker
-            idx = int(np.argmin(self._result.s21_db))
-            ax.plot(freqs_ghz[idx], self._result.s21_db[idx], "v",
-                    color=_C_S21, markersize=8)
+        gm = params["Gamma_m"]
+        target_db = 20 * np.log10(gm) if gm > 0 else -60
+        ax.axhline(target_db, color=_C_TARGET, ls='--', lw=1,
+                    label=f"Target Γm={gm:.3f} ({target_db:.1f} dB)")
 
-        if self._chk_s22.GetValue():
-            ax.plot(freqs_ghz, self._result.s22_db, color=_C_S22,
-                    linewidth=1.5, label=f"|S22| (z02={z02:.0f}Ω)")
-
-        # Γm target line
-        Gamma_m = float(self._gm.GetValue())
-        if Gamma_m > 0:
-            target_db = 20.0 * np.log10(Gamma_m)
-            ax.axhline(target_db, color=_C_TARGET, linestyle="--",
-                       linewidth=0.8, label=f"Γm target = {target_db:.1f} dB")
+        # Markers
+        i_worst_s11 = np.argmax(result.s11_db)
+        ax.plot(f[i_worst_s11], result.s11_db[i_worst_s11], 'v',
+                color=_C_S11, ms=8)
+        i_worst_il = np.argmax(result.s21_db)
+        ax.plot(f[i_worst_il], result.s21_db[i_worst_il], '^',
+                color=_C_S21, ms=8)
 
         ax.set_xlabel("Frequency (GHz)")
         ax.set_ylabel("Magnitude (dB)")
-        ax.set_title(f"S-Parameters — z01={z01:.0f}Ω, z02={z02:.0f}Ω")
-        ax.legend(fontsize=8, loc="best")
+        ax.set_title(
+            f"S-Parameters — z₀₁={result.z01:.0f}Ω, z₀₂={result.z02:.0f}Ω  "
+            f"[Fast model]")
+        ax.legend(loc="lower right", fontsize=9)
         ax.grid(True, alpha=0.3)
-
-        self._canvas.draw()
-
-    def _update_metrics(self):
-        if self._result is None or self._profile is None:
-            return
-
-        r = self._result
-        p = self._profile
-
-        text = (
-            f"Max |S11|:   {r.max_s11_db:.2f} dB\n"
-            f"Max |S22|:   {r.max_s22_db:.2f} dB\n"
-            f"Worst IL:    {r.max_insertion_loss_db:.2f} dB\n"
-            f"\n"
-            f"z01 = {r.z01:.0f} Ω (ZS)\n"
-            f"z02 = {r.z02:.0f} Ω (ZL)\n"
-            f"\n"
-            f"Length:      {p.L*1e3:.2f} mm\n"
-            f"Segments:    {len(r.body_segments)}\n"
-        )
-
-        if r.warnings.messages:
-            text += "\n⚠ Warnings:\n"
-            for w in r.warnings.messages:
-                text += f"  • {w.text}\n"
-
-        self._metrics_text.SetLabel(text)
-
-    # ─── Export ───────────────────────────────────────────────────────
-
-    def _export_all(self, output_dir: pathlib.Path):
-        """Export all report files to the given directory."""
-        if self._result is None or self._profile is None:
-            raise ValueError("No computed result to export.")
-
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Text / JSON report
-        from rfcore.reports import TaperReport
-        report = TaperReport(
-            self._settings, self._profile, self._result, [], [],
-        )
-        report.save_text(str(output_dir / "report.txt"))
-        report.save_json(str(output_dir / "report.json"))
-
-        # PNG plots
-        from rfcore.plots import generate_all_plots
-        generate_all_plots(self._result, self._profile, output_dir / "plots")
-
-        # CSV
-        from rfcore.export.csv_export import export_frequency_csv, export_geometry_csv
-        export_frequency_csv(self._result, output_dir / "frequency_data.csv")
-        export_geometry_csv(self._profile, output_dir / "geometry_data.csv")
-
-        # Touchstone
-        from rfcore.export.touchstone import export_touchstone_v2, export_touchstone_v1
-        export_touchstone_v2(self._result, output_dir / "taper.ts")
-        export_touchstone_v1(self._result, output_dir / "taper_compat.s2p")
-
-        # Geometry
-        from rfcore.export.geometry import (
-            generate_taper_polygon, export_svg, export_png_preview,
-            export_kicad_mod,
-        )
-        polygon = generate_taper_polygon(self._profile)
-        export_svg(polygon, output_dir / "taper.svg")
-        export_png_preview(polygon, output_dir / "taper_preview.png")
-        export_kicad_mod(polygon, output_dir / "taper.kicad_mod")
-
-    # ─── Sidecar ─────────────────────────────────────────────────────
-
-    def _save_sidecar(self):
-        """Save sidecar metadata alongside the board file."""
-        if self._board is None:
-            return
-        try:
-            from addon.kicad_compat import get_board_filename
-            from addon.ui_main import save_settings, save_report
-            from rfcore.reports import TaperReport
-
-            board_path = get_board_filename(self._board)
-            if not board_path:
-                return
-
-            save_settings(board_path, self._settings)
-
-            report = TaperReport(
-                self._settings, self._profile, self._result, [], [],
-            )
-            save_report(board_path, report)
-        except Exception:
-            pass  # Don't block insertion if sidecar fails
+        fig.tight_layout()
+        canvas.draw()
+        self.Show()
 
 
-# ── Standalone test entry point ──────────────────────────────────────────
+# ── Stackup Settings Dialog ──────────────────────────────────────────
 
-def run_standalone_test():
-    """Run the dialog standalone for testing (no KiCad required)."""
-    if not HAS_WX:
-        print("wxPython not available. Cannot run dialog test.")
-        return
+class StackupDialog(wx.Dialog):
+    """Display/edit stackup parameters (read-only in v1)."""
 
-    app = wx.App()
-    sel = SelectionResult(
-        mode="manual", valid=True,
-        layer="F.Cu", net_name="SIG_RF",
-        start_x_m=0.01, start_y_m=0.02,
-        end_x_m=0.07, end_y_m=0.02,
-        start_width_m=0.5e-3, end_width_m=0.22e-3,
-    )
-    dlg = TaperDialog(None, board=None, selection=sel)
-    dlg.ShowModal()
-    dlg.Destroy()
-    app.MainLoop()
+    def __init__(self, parent, settings: RFProjectSettings):
+        super().__init__(parent, title="Stackup Settings", size=(380, 350))
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        box = wx.StaticBoxSizer(wx.VERTICAL, self, "RO4350B 10mil (default)")
+        grid = wx.FlexGridSizer(cols=2, hgap=12, vgap=6)
+        grid.AddGrowableCol(1)
+
+        s = settings.stackup
+        fields = [
+            ("Substrate height:", f"{s.h_sub_m*1e6:.1f} µm"),
+            ("Dk (εr):", f"{s.dk_10ghz:.2f}"),
+            ("Df (tan δ):", f"{s.df_10ghz:.4f}"),
+            ("Cu thickness:", f"{s.t_cu_m*1e6:.1f} µm"),
+            ("Cu roughness (Rq):", f"{s.rq_m*1e6:.2f} µm"),
+            ("Soldermask:", "Not modeled (v1)"),
+        ]
+        for label, value in fields:
+            grid.Add(wx.StaticText(self, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+            grid.Add(wx.StaticText(self, label=value), 0, wx.ALIGN_CENTER_VERTICAL)
+
+        box.Add(grid, 1, wx.EXPAND | wx.ALL, 8)
+        sizer.Add(box, 1, wx.EXPAND | wx.ALL, 10)
+
+        note = wx.StaticText(self,
+            label="Stackup editing will be available in a future version.\n"
+                  "Currently using RO4350B 10mil defaults.")
+        note.SetForegroundColour(wx.Colour(120, 120, 120))
+        sizer.Add(note, 0, wx.ALL, 10)
+
+        btn = wx.Button(self, wx.ID_OK, "OK")
+        sizer.Add(btn, 0, wx.ALIGN_CENTER | wx.BOTTOM, 10)
+        self.SetSizer(sizer)
+        self.CenterOnParent()
 
 
-if __name__ == "__main__":
-    run_standalone_test()
+# For backward compatibility / standalone testing
+TaperDialog = TaperWizard

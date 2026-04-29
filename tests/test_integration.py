@@ -6,6 +6,7 @@ These tests exercise the full pipeline without a KiCad connection.
 import json
 import math
 import os
+import pathlib
 import tempfile
 
 import numpy as np
@@ -524,3 +525,74 @@ class TestKicadCompatCoercion:
             assert isinstance(fx, float)
             assert isinstance(fy, float)
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# Footprint generation
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestFootprintGeneration:
+    """Test .kicad_mod footprint generation."""
+
+    def _make_spec(self):
+        from rfcore.microstrip import MicrostripModel
+        from rfcore.klopfenstein import KlopfensteinProfile
+        from addon.footprint_gen import FootprintSpec
+
+        ms = MicrostripModel.from_settings(RFProjectSettings())
+        profile = KlopfensteinProfile(
+            ZS=50, ZL=75, Gamma_m=0.05, microstrip=ms, f_min=1e9)
+        return FootprintSpec(profile=profile, fp_name="Test_50_75",
+                             ZS=50, ZL=75, Gamma_m=0.05)
+
+    def test_contains_pads(self):
+        from addon.footprint_gen import generate_footprint
+        content = generate_footprint(self._make_spec())
+        assert '(pad "1" smd rect' in content
+        assert '(pad "2" smd rect' in content
+
+    def test_contains_polygon(self):
+        from addon.footprint_gen import generate_footprint
+        content = generate_footprint(self._make_spec())
+        assert "(fp_poly" in content
+        assert "(fill solid)" in content
+
+    def test_metadata_in_descr(self):
+        from addon.footprint_gen import generate_footprint
+        content = generate_footprint(self._make_spec())
+        assert "ZS=50" in content
+        assert "ZL=75" in content
+
+    def test_save_to_library(self):
+        from addon.footprint_gen import generate_footprint, save_footprint
+        content = generate_footprint(self._make_spec())
+        with tempfile.TemporaryDirectory() as td:
+            lib = pathlib.Path(td) / "Test.pretty"
+            fp = save_footprint(content, "Test_50_75", lib)
+            assert fp.exists()
+            assert fp.suffix == ".kicad_mod"
+            assert lib.is_dir()
+
+    def test_auto_name(self):
+        from addon.footprint_gen import auto_footprint_name
+        name = auto_footprint_name(50, 75, 0.05, 1e9)
+        assert "50" in name and "75" in name and "1GHz" in name
+
+    def test_dimensions(self):
+        from addon.footprint_gen import footprint_dimensions
+        dims = footprint_dimensions(self._make_spec())
+        assert dims["L_body_mm"] > 0
+        assert dims["L_total_mm"] > dims["L_body_mm"]
+        assert dims["pad2_x_mm"] > 0
+
+    def test_pad_coordinate_convention(self):
+        from addon.footprint_gen import footprint_dimensions
+        dims = footprint_dimensions(self._make_spec())
+        assert dims["pad1_x_mm"] == 0.0
+        expected = (dims["L_landing_start_mm"]/2 + dims["L_body_mm"]
+                    + dims["L_landing_end_mm"]/2)
+        assert abs(dims["pad2_x_mm"] - expected) < 0.001
+
+    def test_polygon_has_many_vertices(self):
+        from addon.footprint_gen import generate_footprint
+        content = generate_footprint(self._make_spec())
+        assert content.count("(xy ") > 10

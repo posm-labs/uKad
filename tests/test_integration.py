@@ -544,23 +544,37 @@ class TestFootprintGeneration:
         return FootprintSpec(profile=profile, fp_name="Test_50_75",
                              ZS=50, ZL=75, Gamma_m=0.05)
 
-    def test_contains_pads(self):
+    def test_primary_has_custom_pad(self):
+        from addon.footprint_gen import generate_footprint
+        content = generate_footprint(self._make_spec())
+        assert '(pad "1" smd custom' in content
+        assert "(gr_poly" in content
+        assert "(fill yes)" in content
+
+    def test_primary_has_routing_pad(self):
         from addon.footprint_gen import generate_footprint
         content = generate_footprint(self._make_spec())
         assert '(pad "1" smd rect' in content
-        assert '(pad "2" smd rect' in content
 
-    def test_contains_polygon(self):
+    def test_primary_single_pad_name(self):
+        """Both pads must use same name '1' for single-net."""
         from addon.footprint_gen import generate_footprint
         content = generate_footprint(self._make_spec())
+        assert '(pad "2"' not in content
+
+    def test_debug_has_separate_pads(self):
+        from addon.footprint_gen import generate_footprint_debug
+        content = generate_footprint_debug(self._make_spec())
+        assert '(pad "1" smd rect' in content
+        assert '(pad "2" smd rect' in content
         assert "(fp_poly" in content
-        assert "(fill solid)" in content
 
     def test_metadata_in_descr(self):
         from addon.footprint_gen import generate_footprint
         content = generate_footprint(self._make_spec())
         assert "ZS=50" in content
         assert "ZL=75" in content
+        assert "uKad" in content
 
     def test_save_to_library(self):
         from addon.footprint_gen import generate_footprint, save_footprint
@@ -596,3 +610,4 @@ class TestFootprintGeneration:
         from addon.footprint_gen import generate_footprint
         content = generate_footprint(self._make_spec())
         assert content.count("(xy ") > 10
+

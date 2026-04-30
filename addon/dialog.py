@@ -26,6 +26,7 @@ try:
     import matplotlib
     matplotlib.use("WXAgg")
     from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg as FigureCanvas
+    from matplotlib.backends.backend_wxagg import NavigationToolbar2WxAgg as NavToolbar
     from matplotlib.figure import Figure
     HAS_MPL = True
 except ImportError:
@@ -122,7 +123,8 @@ class TaperWizard(wx.Dialog):
         self._gm = self._add_field(grid_e, panel, "Γm:", "0.05")
         self._fstart = self._add_field(grid_e, panel, "f_start (GHz):", "1.0")
         self._fstop = self._add_field(grid_e, panel, "f_stop (GHz):", "10.0")
-        self._lm = self._add_field(grid_e, panel, "length_margin:", "1.0")
+        self._lm = self._add_field(grid_e, panel, "Length multiplier:", "1.0")
+        self._lm.SetToolTip("L_body = multiplier × L_min. Values >1 create a longer, more conservative taper.")
 
         box_e.Add(grid_e, 0, wx.EXPAND | wx.ALL, 4)
         sizer.Add(box_e, 0, wx.EXPAND | wx.BOTTOM, 6)
@@ -132,8 +134,10 @@ class TaperWizard(wx.Dialog):
         grid_g = wx.FlexGridSizer(cols=2, hgap=8, vgap=4)
         grid_g.AddGrowableCol(1)
 
-        self._land_s = self._add_field(grid_g, panel, "Input landing (mm):", "0.5")
-        self._land_e = self._add_field(grid_g, panel, "Output landing (mm):", "0.5")
+        self._land_s = self._add_field(grid_g, panel, "Input landing length (mm):", "0.5")
+        self._land_s.SetToolTip("Constant-width routing section at input. Width = w_start.")
+        self._land_e = self._add_field(grid_g, panel, "Output landing length (mm):", "0.5")
+        self._land_e.SetToolTip("Constant-width routing section at output. Width = w_end.")
         self._fp_name = self._add_field(grid_g, panel, "Footprint name:", "")
 
         box_g.Add(grid_g, 0, wx.EXPAND | wx.ALL, 4)
@@ -162,6 +166,9 @@ class TaperWizard(wx.Dialog):
             self._fig.patch.set_facecolor(_C_BG)
             self._ax_prev = self._fig.add_subplot(111)
             self._canvas = FigureCanvas(panel, -1, self._fig)
+            self._nav_tb = NavToolbar(self._canvas)
+            self._nav_tb.Realize()
+            sizer.Add(self._nav_tb, 0, wx.EXPAND)
             sizer.Add(self._canvas, 1, wx.EXPAND)
             self._draw_empty_preview()
         else:
@@ -274,14 +281,25 @@ class TaperWizard(wx.Dialog):
             f_start_hz=f_start, f_stop_hz=f_stop,
         )
 
+    def _safe_float(self, ctrl, default, label="value"):
+        """Parse float from text control, show error and return default on failure."""
+        try:
+            v = float(ctrl.GetValue())
+            return v
+        except (ValueError, TypeError):
+            wx.MessageBox(f"Invalid {label}: '{ctrl.GetValue()}'\nUsing default {default}.",
+                          "Input Error", wx.OK | wx.ICON_WARNING)
+            ctrl.SetValue(str(default))
+            return default
+
     def _read_params(self):
         return {
-            "ZS": float(self._zs.GetValue()),
-            "ZL": float(self._zl.GetValue()),
-            "Gamma_m": float(self._gm.GetValue()),
-            "f_start": float(self._fstart.GetValue()) * 1e9,
-            "f_stop": float(self._fstop.GetValue()) * 1e9,
-            "length_margin": float(self._lm.GetValue()),
+            "ZS": self._safe_float(self._zs, 50.0, "ZS"),
+            "ZL": self._safe_float(self._zl, 75.0, "ZL"),
+            "Gamma_m": self._safe_float(self._gm, 0.05, "Γm"),
+            "f_start": self._safe_float(self._fstart, 1.0, "f_start") * 1e9,
+            "f_stop": self._safe_float(self._fstop, 10.0, "f_stop") * 1e9,
+            "length_margin": self._safe_float(self._lm, 1.0, "Length multiplier"),
         }
 
     # ── Button handlers ──────────────────────────────────────────────
@@ -316,8 +334,11 @@ class TaperWizard(wx.Dialog):
                 f"f_stop = {p['f_stop']/1e9:.2f} GHz",
                 "",
                 f"L_min   = {profile.L_min*1e3:.3f} mm",
+                f"L_mult  = {p['length_margin']:.2f}x",
                 f"L_body  = {dims['L_body_mm']:.3f} mm  (RF taper)",
-                f"L_total = {dims['L_total_mm']:.3f} mm  (with landings)",
+                f"L_land_in  = {dims['L_landing_start_mm']:.3f} mm",
+                f"L_land_out = {dims['L_landing_end_mm']:.3f} mm",
+                f"L_total = {dims['L_total_mm']:.3f} mm",
                 "",
                 f"w_start = {dims['w_start_mm']:.4f} mm",
                 f"w_end   = {dims['w_end_mm']:.4f} mm",
@@ -353,8 +374,9 @@ class TaperWizard(wx.Dialog):
             return
         try:
             dlg = SParamPlotDialog(self, self._result, self._read_params())
-            dlg.Show()
-            logger.info("S-Parameter plot window created")
+            dlg.ShowModal()
+            dlg.Destroy()
+            logger.info("S-Parameter plot window closed")
         except Exception as e:
             logger.error("S-param plot failed: %s\n%s", e, traceback.format_exc())
             wx.MessageBox(f"S-parameter plot failed:\n{e}", "Error",
@@ -456,11 +478,12 @@ class TaperWizard(wx.Dialog):
 
 # ── S-Parameter Plot Dialog ──────────────────────────────────────────
 
-class SParamPlotDialog(wx.Frame):
-    """Separate interactive S-parameter plot window."""
+class SParamPlotDialog(wx.Dialog):
+    """Separate interactive S-parameter plot window (closeable dialog)."""
 
     def __init__(self, parent, result: AssemblyResult, params: dict):
-        super().__init__(parent, title="S-Parameters", size=(700, 500))
+        super().__init__(parent, title="S-Parameters", size=(750, 550),
+                         style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self._result = result
         self._params = params
 
@@ -469,43 +492,48 @@ class SParamPlotDialog(wx.Frame):
             self.Destroy()
             return
 
-        panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
         fig = Figure(figsize=(7, 5), dpi=100)
-        canvas = FigureCanvas(panel, -1, fig)
+        canvas = FigureCanvas(self, -1, fig)
+        toolbar = NavToolbar(canvas)
+        toolbar.Realize()
+        sizer.Add(toolbar, 0, wx.EXPAND)
         sizer.Add(canvas, 1, wx.EXPAND)
-        panel.SetSizer(sizer)
+
+        btn_close = wx.Button(self, wx.ID_CLOSE, "Close")
+        btn_close.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CLOSE))
+        sizer.Add(btn_close, 0, wx.ALIGN_CENTER | wx.ALL, 5)
+        self.SetSizer(sizer)
 
         ax = fig.add_subplot(111)
         f = result.freqs / 1e9
 
-        ax.plot(f, result.s11_db, color=_C_S11, lw=1.5, label="|S₁₁|")
-        ax.plot(f, result.s21_db, color=_C_S21, lw=1.5, label="|S₂₁|")
-        ax.plot(f, result.s22_db, color=_C_S22, lw=1.5, label="|S₂₂|")
+        ax.plot(f, result.s11_db, color=_C_S11, lw=1.5, label="|S11|")
+        ax.plot(f, result.s21_db, color=_C_S21, lw=1.5, label="|S21|")
+        ax.plot(f, result.s22_db, color=_C_S22, lw=1.5, label="|S22|")
 
         gm = params["Gamma_m"]
         target_db = 20 * np.log10(gm) if gm > 0 else -60
         ax.axhline(target_db, color=_C_TARGET, ls='--', lw=1,
-                    label=f"Target Γm={gm:.3f} ({target_db:.1f} dB)")
+                    label=f"Target Gm={gm:.3f} ({target_db:.1f} dB)")
 
-        # Markers
         i_worst_s11 = np.argmax(result.s11_db)
         ax.plot(f[i_worst_s11], result.s11_db[i_worst_s11], 'v',
                 color=_C_S11, ms=8)
-        i_worst_il = np.argmax(result.s21_db)
+        i_worst_il = np.argmin(result.s21_db)
         ax.plot(f[i_worst_il], result.s21_db[i_worst_il], '^',
                 color=_C_S21, ms=8)
 
         ax.set_xlabel("Frequency (GHz)")
         ax.set_ylabel("Magnitude (dB)")
         ax.set_title(
-            f"S-Parameters — z₀₁={result.z01:.0f}Ω, z₀₂={result.z02:.0f}Ω  "
+            f"z01={result.z01:.0f} ohm, z02={result.z02:.0f} ohm  "
             f"[Fast model]")
         ax.legend(loc="lower right", fontsize=9)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         canvas.draw()
-        self.Show()
+        self.CenterOnParent()
 
 
 # ── Stackup Settings Dialog ──────────────────────────────────────────
@@ -514,21 +542,23 @@ class StackupDialog(wx.Dialog):
     """Display/edit stackup parameters (read-only in v1)."""
 
     def __init__(self, parent, settings: RFProjectSettings):
-        super().__init__(parent, title="Stackup Settings", size=(380, 350))
+        super().__init__(parent, title="Stackup Settings", size=(400, 380))
         sizer = wx.BoxSizer(wx.VERTICAL)
 
-        box = wx.StaticBoxSizer(wx.VERTICAL, self, "RO4350B 10mil (default)")
+        s = settings.stackup
+        box = wx.StaticBoxSizer(wx.VERTICAL, self, f"{s.laminate} ({s.substrate_height_m*1e3:.1f} mil)")
         grid = wx.FlexGridSizer(cols=2, hgap=12, vgap=6)
         grid.AddGrowableCol(1)
 
-        s = settings.stackup
         fields = [
-            ("Substrate height:", f"{s.h_sub_m*1e6:.1f} µm"),
-            ("Dk (εr):", f"{s.dk_10ghz:.2f}"),
-            ("Df (tan δ):", f"{s.df_10ghz:.4f}"),
-            ("Cu thickness:", f"{s.t_cu_m*1e6:.1f} µm"),
-            ("Cu roughness (Rq):", f"{s.rq_m*1e6:.2f} µm"),
-            ("Soldermask:", "Not modeled (v1)"),
+            ("Laminate:", s.laminate),
+            ("Substrate height:", f"{s.substrate_height_m*1e6:.1f} um ({s.substrate_height_m*1e3/0.0254:.1f} mil)"),
+            ("Dk (design):", f"{s.dk_design:.2f}"),
+            ("Df (tan d):", f"{s.df_10ghz:.4f}"),
+            ("Cu thickness:", f"{s.copper_thickness_m*1e6:.1f} um"),
+            ("Cu roughness (Rq):", f"{s.surface_roughness_m*1e6:.2f} um"),
+            ("Cu conductivity:", f"{s.conductivity_s_per_m:.1e} S/m"),
+            ("Soldermask:", "Present" if s.soldermask_present else "Not modeled (v1)"),
         ]
         for label, value in fields:
             grid.Add(wx.StaticText(self, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
@@ -538,8 +568,8 @@ class StackupDialog(wx.Dialog):
         sizer.Add(box, 1, wx.EXPAND | wx.ALL, 10)
 
         note = wx.StaticText(self,
-            label="Stackup editing will be available in a future version.\n"
-                  "Currently using RO4350B 10mil defaults.")
+            label="Editable / multiple stackups planned for future version.\n"
+                  f"Currently using {s.laminate} defaults.")
         note.SetForegroundColour(wx.Colour(120, 120, 120))
         sizer.Add(note, 0, wx.ALL, 10)
 

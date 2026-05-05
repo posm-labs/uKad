@@ -712,5 +712,75 @@ class TestSparamHTML:
         assert "S11" in html
         assert "S21" in html
         assert "S22" in html
-        assert "z01=50" in html
-        assert "z02=75" in html
+        assert "Frequency" in html
+        assert "Magnitude" in html
+
+
+class TestLandingBlocks:
+    """Verify landing block integration and regression properties."""
+
+    def _synth(self, ls_m=0.0, le_m=0.0):
+        from addon.ui_main import synthesize_taper_with_landings, SynthesisRequest
+        settings = RFProjectSettings()
+        settings.analysis.f_start_hz = 6e9
+        settings.analysis.f_stop_hz = 20e9
+        request = SynthesisRequest(ZS_ohm=50, ZL_ohm=75, Gamma_m=0.05)
+        return synthesize_taper_with_landings(
+            request, settings,
+            landing_start_m=ls_m, landing_end_m=le_m,
+        )
+
+    def test_zero_landings_match_golden(self):
+        """With zero-length landings, results must match taper-only golden values."""
+        result, _, profile = self._synth(0.0, 0.0)
+        assert abs(profile.L - 0.010095775349581507) < 1e-9
+        assert abs(result.max_s11_db - (-25.95045255855206)) < 0.01
+        assert abs(result.max_insertion_loss_db - (-0.1297696680008104)) < 0.005
+
+    def test_finite_landings_no_s11_degradation(self):
+        """Matched landings should not significantly degrade S11."""
+        result_bare, _, _ = self._synth(0.0, 0.0)
+        result_land, _, _ = self._synth(0.5e-3, 0.5e-3)
+        # S11 should not degrade by more than 1 dB
+        assert result_land.max_s11_db < result_bare.max_s11_db + 1.0
+
+    def test_finite_landings_add_insertion_loss(self):
+        """Matched landings add a tiny amount of insertion loss (lossy line)."""
+        result_bare, _, _ = self._synth(0.0, 0.0)
+        result_land, _, _ = self._synth(0.5e-3, 0.5e-3)
+        # More negative = more loss; landings add loss
+        assert result_land.max_insertion_loss_db <= result_bare.max_insertion_loss_db
+
+    def test_landing_block_identity_at_zero(self):
+        """LandingBlock with length=0 returns identity ABCD."""
+        from rfcore.discontinuities.landing import LandingBlock
+        from rfcore.microstrip import MicrostripModel
+        ms = MicrostripModel.from_settings(RFProjectSettings())
+        block = LandingBlock(0.5e-3, 0.0, ms, "test")
+        abcd = block.abcd(6e9)
+        assert abs(abcd[0, 0] - 1.0) < 1e-12
+        assert abs(abcd[0, 1]) < 1e-12
+        assert abs(abcd[1, 0]) < 1e-12
+        assert abs(abcd[1, 1] - 1.0) < 1e-12
+
+    def test_polygon_no_shoulder(self):
+        """Output landing edges must be at w_end, no expansion."""
+        from addon.footprint_gen import FootprintSpec, _taper_polygon_mm, footprint_dimensions
+        _, _, profile = self._synth(0.5e-3, 0.5e-3)
+        spec = FootprintSpec(profile=profile, fp_name='test', ZS=50, ZL=75,
+                             Gamma_m=0.05, f_start_hz=6e9, f_stop_hz=20e9)
+        poly = _taper_polygon_mm(spec)
+        dims = footprint_dimensions(spec)
+
+        # Find the rightmost points (output landing)
+        w_end = dims['w_end_mm']
+        total_x = dims['L_total_mm']
+        # The rightmost x should be at total extent
+        xs = [p[0] for p in poly]
+        max_x = max(xs)
+        assert abs(max_x - (dims['pad2_x_mm'] + dims['L_landing_end_mm'] / 2)) < 0.01
+
+        # The y-extent at the rightmost edge should be w_end/2
+        right_ys = [abs(p[1]) for p in poly if abs(p[0] - max_x) < 0.01]
+        assert all(abs(y - w_end / 2) < 0.001 for y in right_ys), \
+            f"Output landing y-extent should be w_end/2={w_end/2}, got {right_ys}"

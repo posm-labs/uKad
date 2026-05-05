@@ -74,50 +74,58 @@ def generate_sparam_html(result: AssemblyResult, params: dict) -> str:
     traces = json.dumps([
         {
             "x": f_ghz, "y": s11, "name": "|S11|",
-            "line": {"color": "#1f77b4", "width": 2},
+            "line": {"color": "#5b9bd5", "width": 2},
             "hovertemplate": "f=%{x:.3f} GHz<br>S11=%{y:.2f} dB<extra></extra>",
         },
         {
             "x": f_ghz, "y": s21, "name": "|S21|",
-            "line": {"color": "#2ca02c", "width": 2},
+            "line": {"color": "#70c070", "width": 2},
             "hovertemplate": "f=%{x:.3f} GHz<br>S21=%{y:.2f} dB<extra></extra>",
         },
         {
             "x": f_ghz, "y": s22, "name": "|S22|",
-            "line": {"color": "#d62728", "width": 2},
+            "line": {"color": "#e06060", "width": 2},
             "hovertemplate": "f=%{x:.3f} GHz<br>S22=%{y:.2f} dB<extra></extra>",
         },
         {
             "x": [f_ghz[0], f_ghz[-1]], "y": [target_db, target_db],
             "name": f"Target Gm={gm:.3f} ({target_db:.1f} dB)",
-            "line": {"color": "#888", "width": 1, "dash": "dash"},
+            "line": {"color": "#555", "width": 1, "dash": "dash"},
             "hoverinfo": "skip",
         },
         {
             "x": [f_ghz[i_s11]], "y": [s11[i_s11]],
             "name": f"Worst S11: {s11[i_s11]:.1f} dB @ {f_ghz[i_s11]:.2f} GHz",
             "mode": "markers",
-            "marker": {"color": "#1f77b4", "size": 10, "symbol": "triangle-down"},
+            "marker": {"color": "#5b9bd5", "size": 7, "symbol": "triangle-down", "opacity": 0.8},
             "hovertemplate": "Worst S11<br>f=%{x:.3f} GHz<br>%{y:.2f} dB<extra></extra>",
         },
         {
             "x": [f_ghz[i_il]], "y": [s21[i_il]],
             "name": f"Worst IL: {s21[i_il]:.2f} dB @ {f_ghz[i_il]:.2f} GHz",
             "mode": "markers",
-            "marker": {"color": "#2ca02c", "size": 10, "symbol": "triangle-up"},
+            "marker": {"color": "#70c070", "size": 7, "symbol": "triangle-up", "opacity": 0.8},
             "hovertemplate": "Worst IL<br>f=%{x:.3f} GHz<br>%{y:.2f} dB<extra></extra>",
         },
     ])
 
     layout = json.dumps({
-        "title": f"S-Parameters — z01={result.z01:.0f} Ω, z02={result.z02:.0f} Ω  [Fast analytical model]",
-        "xaxis": {"title": "Frequency (GHz)", "gridcolor": "#ddd"},
-        "yaxis": {"title": "Magnitude (dB)", "gridcolor": "#ddd"},
+        "xaxis": {
+            "title": {"text": "Frequency (GHz)", "font": {"color": "#aaa"}},
+            "gridcolor": "#2a2a4a", "zerolinecolor": "#2a2a4a",
+            "tickfont": {"color": "#888"},
+        },
+        "yaxis": {
+            "title": {"text": "Magnitude (dB)", "font": {"color": "#aaa"}},
+            "gridcolor": "#2a2a4a", "zerolinecolor": "#2a2a4a",
+            "tickfont": {"color": "#888"},
+        },
         "hovermode": "x unified",
-        "legend": {"orientation": "h", "y": -0.15},
-        "margin": {"t": 50, "b": 80, "l": 60, "r": 20},
-        "plot_bgcolor": "#fafafa",
-        "paper_bgcolor": "#fff",
+        "legend": {"orientation": "h", "y": -0.12, "font": {"color": "#ccc"}},
+        "margin": {"t": 20, "b": 70, "l": 60, "r": 20},
+        "plot_bgcolor": "#1a1a2e",
+        "paper_bgcolor": "#12122a",
+        "font": {"color": "#ccc"},
     })
 
     return f"""<!DOCTYPE html>
@@ -127,7 +135,7 @@ def generate_sparam_html(result: AssemblyResult, params: dict) -> str:
 <title>S-Parameters — uKad Klopfenstein Taper</title>
 {_plotly_js_src()}
 <style>
-body {{ margin: 0; font-family: -apple-system, sans-serif; }}
+body {{ margin: 0; font-family: -apple-system, sans-serif; background: #12122a; }}
 #plot {{ width: 100vw; height: 100vh; }}
 </style>
 </head>

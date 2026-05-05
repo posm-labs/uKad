@@ -218,6 +218,8 @@ class TaperWizard(wx.Dialog):
             "f_start": self._safe_float(self._fstart, 1.0, "f_start") * 1e9,
             "f_stop": self._safe_float(self._fstop, 10.0, "f_stop") * 1e9,
             "length_margin": self._safe_float(self._lm, 1.0, "Length multiplier"),
+            "landing_start_m": self._safe_float(self._land_s, 0.5, "Input landing") * 1e-3,
+            "landing_end_m": self._safe_float(self._land_e, 0.5, "Output landing") * 1e-3,
         }
 
     # ── RF result caching ──────────────────────────────────────────
@@ -232,6 +234,8 @@ class TaperWizard(wx.Dialog):
             f"df={s.df_10ghz}", f"tcu={s.copper_thickness_m}",
             f"rq={s.surface_roughness_m}", f"sig={s.conductivity_s_per_m}",
             f"nf={self._settings.analysis.n_points}",
+            f"ls={p.get('landing_start_m', 0)}",
+            f"le={p.get('landing_end_m', 0)}",
         ]
         return hashlib.md5("|".join(parts).encode()).hexdigest()
 
@@ -248,7 +252,7 @@ class TaperWizard(wx.Dialog):
             if key == self._cache_key and self._result is not None:
                 logger.info("RF cache hit — skipping synthesis")
             else:
-                from addon.ui_main import synthesize_taper, SynthesisRequest
+                from addon.ui_main import synthesize_taper_with_landings, SynthesisRequest
 
                 self._settings.analysis.f_start_hz = p["f_start"]
                 self._settings.analysis.f_stop_hz = p["f_stop"]
@@ -256,7 +260,11 @@ class TaperWizard(wx.Dialog):
 
                 request = SynthesisRequest(
                     ZS_ohm=p["ZS"], ZL_ohm=p["ZL"], Gamma_m=p["Gamma_m"])
-                result, report, profile = synthesize_taper(request, self._settings)
+                result, report, profile = synthesize_taper_with_landings(
+                    request, self._settings,
+                    landing_start_m=p["landing_start_m"],
+                    landing_end_m=p["landing_end_m"],
+                )
 
                 self._profile = profile
                 self._result = result

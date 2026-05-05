@@ -119,6 +119,78 @@ def synthesize_taper(
     return result, report, profile
 
 
+def synthesize_taper_with_landings(
+    request: SynthesisRequest,
+    settings: Optional[RFProjectSettings] = None,
+    landing_start_m: float = 0.0,
+    landing_end_m: float = 0.0,
+) -> Tuple[AssemblyResult, TaperReport, KlopfensteinProfile]:
+    """Synthesize taper with constant-width landing sections in the RF cascade.
+
+    The landing sections are modeled as lossy transmission line segments
+    prepended/appended to the taper body in the ABCD cascade.
+
+    With landing_start_m == 0 and landing_end_m == 0, this produces
+    identical results to synthesize_taper().
+
+    Parameters
+    ----------
+    request : SynthesisRequest
+    settings : RFProjectSettings or None
+    landing_start_m : float
+        Input landing length (metres). Width = w_start.
+    landing_end_m : float
+        Output landing length (metres). Width = w_end.
+
+    Returns
+    -------
+    (assembly_result, report, profile) : tuple
+    """
+    from rfcore.discontinuities.landing import LandingBlock
+
+    if settings is None:
+        settings = RFProjectSettings()
+
+    microstrip = MicrostripModel.from_settings(settings)
+
+    profile = KlopfensteinProfile(
+        ZS=request.ZS_ohm,
+        ZL=request.ZL_ohm,
+        Gamma_m=request.Gamma_m,
+        microstrip=microstrip,
+        L=request.L_fixed_m,
+        f_min=settings.analysis.f_start_hz,
+        f_geom=settings.analysis.f_geom,
+        length_margin=settings.analysis.length_margin,
+    )
+
+    # Build landing blocks (zero length → identity ABCD → no effect)
+    w_start = float(profile.w_layout[0])
+    w_end = float(profile.w_layout[-1])
+
+    left_chain: List[DiscontinuityBlock] = []
+    right_chain: List[DiscontinuityBlock] = []
+
+    if landing_start_m > 0:
+        left_chain.append(LandingBlock(
+            w_start, landing_start_m, microstrip, "input_landing"))
+
+    if landing_end_m > 0:
+        right_chain.append(LandingBlock(
+            w_end, landing_end_m, microstrip, "output_landing"))
+
+    assembly = TaperAssembly(
+        settings, profile, microstrip, left_chain, right_chain,
+    )
+    result = assembly.evaluate()
+
+    report = TaperReport(
+        settings, profile, result, left_chain, right_chain,
+    )
+
+    return result, report, profile
+
+
 def synthesize_with_discontinuities(
     request: SynthesisRequest,
     settings: RFProjectSettings,

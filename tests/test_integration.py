@@ -649,3 +649,68 @@ class TestExports:
             p = pathlib.Path(td) / "test.s2p"
             export_touchstone_v1(result, p)
             assert p.exists()
+
+
+class TestGoldenRegression:
+    """Golden RF regression: verify backend output unchanged after UI refactor.
+
+    These values are captured from the current working backend (2026-05-05).
+    If any test here fails, the RF core was accidentally modified.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        from addon.ui_main import synthesize_taper, SynthesisRequest
+        settings = RFProjectSettings()
+        settings.analysis.f_start_hz = 6e9
+        settings.analysis.f_stop_hz = 20e9
+        request = SynthesisRequest(ZS_ohm=50, ZL_ohm=75, Gamma_m=0.05)
+        self.result, self.report, self.profile = synthesize_taper(request, settings)
+
+    def test_taper_length(self):
+        assert abs(self.profile.L - 0.010095775349581507) < 1e-9
+
+    def test_taper_length_min(self):
+        assert abs(self.profile.L_min - 0.010095775349581507) < 1e-9
+
+    def test_w_start(self):
+        assert abs(float(self.profile.w_layout[0]) - 0.0005069400671898754) < 1e-9
+
+    def test_w_end(self):
+        assert abs(float(self.profile.w_layout[-1]) - 0.00021987933658154402) < 1e-9
+
+    def test_max_s11(self):
+        assert abs(self.result.max_s11_db - (-25.95045255855206)) < 0.01
+
+    def test_max_s22(self):
+        assert abs(self.result.max_s22_db - (-25.94453034368113)) < 0.01
+
+    def test_max_il(self):
+        assert abs(self.result.max_insertion_loss_db - (-0.1297696680008104)) < 0.005
+
+    def test_port_refs(self):
+        assert self.result.z01 == 50.0
+        assert self.result.z02 == 75.0
+
+    def test_freq_count(self):
+        assert len(self.result.freqs) == 201
+
+    def test_z_samples_count(self):
+        assert len(self.profile.z_samples) == 201
+
+
+class TestSparamHTML:
+    """Test Plotly S-param HTML generation (no wx required)."""
+
+    def test_html_contains_plotly(self):
+        from addon.sparam_view import generate_sparam_html
+        from addon.ui_main import synthesize_taper, SynthesisRequest
+        request = SynthesisRequest(ZS_ohm=50, ZL_ohm=75, Gamma_m=0.05)
+        result, _, _ = synthesize_taper(request, RFProjectSettings())
+        html = generate_sparam_html(result, {"Gamma_m": 0.05})
+        assert "Plotly.newPlot" in html
+        assert "S11" in html
+        assert "S21" in html
+        assert "S22" in html
+        assert "z01=50" in html
+        assert "z02=75" in html
